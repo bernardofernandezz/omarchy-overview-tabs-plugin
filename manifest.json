@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "local.task-view",
+  "name": "Task View",
+  "version": "0.1.0",
+  "author": "Bernardo",
+  "license": "MIT",
+  "description": "Native visual window overview for Omarchy, Quattro, Quickshell, and Hyprland.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overview.qml"
+  }
+}
