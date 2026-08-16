@@ -10,6 +10,7 @@ Item {
   id: root
 
   required property int index
+  required property string address
   required property var toplevel
   required property string appId
   required property string appName
@@ -25,7 +26,8 @@ Item {
   property bool showMonitor: false
   property var retainedCaptureSource: null
   property bool fallbackArmed: false
-  property bool previewEverReady: false
+  property string captureState: "idle"
+  property int captureGeneration: -1
 
   signal hovered(int index)
   signal activated(int index)
@@ -38,36 +40,47 @@ Item {
   readonly property real footerHeight: Math.max(
     Style.space(64), Style.font.body + Style.font.caption + Style.space(28))
 
-  function requestPreview() {
-    if (!root.captureEnabled) return
+  function requestPreview(generation) {
+    if (!root.captureEnabled) return false
+
+    root.captureGeneration = Number(generation)
 
     var nextSource = root.toplevel && root.toplevel.wayland
       ? root.toplevel.wayland : null
     if (!nextSource) {
       root.fallbackArmed = true
-      return
+      root.captureState = "failed"
+      return false
     }
 
     fallbackDelay.restart()
     if (root.retainedCaptureSource !== nextSource) {
-      root.previewEverReady = false
+      root.captureState = "capturing"
       root.retainedCaptureSource = nextSource
     } else if (preview.hasContent) {
+      root.captureState = "ready"
       preview.captureFrame()
-    } else if (!root.previewEverReady) {
+    } else {
       // A previous one-shot request may have failed. Recreate the context only
       // on the next overview opening, never in a retry loop.
       root.retainedCaptureSource = null
+      root.captureState = "capturing"
       Qt.callLater(function() {
-        if (root.captureEnabled && root.toplevel && root.toplevel.wayland === nextSource)
+        if (root.captureEnabled && root.captureGeneration === Number(generation)
+            && root.toplevel && root.toplevel.wayland === nextSource)
           root.retainedCaptureSource = nextSource
       })
     }
+
+    if (!preview.hasContent) captureTimeout.restart()
+    return true
   }
 
   onCaptureEnabledChanged: {
-    if (root.captureEnabled) Qt.callLater(root.requestPreview)
-    else fallbackDelay.stop()
+    if (root.captureEnabled) return
+    fallbackDelay.stop()
+    captureTimeout.stop()
+    root.captureState = preview.hasContent ? "ready" : "idle"
   }
 
   onToplevelChanged: {
@@ -75,15 +88,25 @@ Item {
       ? root.toplevel.wayland : null
     if (root.retainedCaptureSource === nextSource) return
     root.retainedCaptureSource = null
-    root.previewEverReady = false
     root.fallbackArmed = false
-    if (root.captureEnabled) Qt.callLater(root.requestPreview)
+    root.captureState = "idle"
   }
 
   Timer {
     id: fallbackDelay
     interval: 180
     onTriggered: root.fallbackArmed = !preview.hasContent
+  }
+
+  Timer {
+    id: captureTimeout
+    interval: 750
+    onTriggered: {
+      if (!preview.hasContent) {
+        root.captureState = "failed"
+        root.fallbackArmed = true
+      }
+    }
   }
 
   z: selected ? 3 : (hot ? 2 : 1)
@@ -133,14 +156,19 @@ Item {
         onHasContentChanged: {
           if (hasContent) {
             fallbackDelay.stop()
-            root.previewEverReady = true
+            captureTimeout.stop()
             root.fallbackArmed = false
+            root.captureState = "ready"
           } else if (root.captureEnabled) {
             fallbackDelay.restart()
           }
         }
 
-        onStopped: root.fallbackArmed = true
+        onStopped: {
+          captureTimeout.stop()
+          root.captureState = "failed"
+          root.fallbackArmed = true
+        }
       }
 
       Rectangle {

@@ -94,12 +94,18 @@ function isGenericLabel(value) {
   var label = normalizeIdentity(value)
   return label === "" || label === "application" || label === "default"
     || label === "quickshell" || label === "orgquickshell"
+    || label === "electron" || label === "electronapp"
 }
 
 function webAppHost(value) {
   var text = String(value || "").toLowerCase()
-  var match = text.match(/^(?:chrome|chromium)-([a-z0-9.-]+?)(?:__|_[^.]|-(?:default|profile))/)
+  var match = text.match(/^(?:chrome|chromium|brave|edge)-([a-z0-9.-]+?)(?:__|_[^.]|-(?:default|profile))/)
   return match ? match[1].replace(/^www\./, "") : ""
+}
+
+function steamAppId(value) {
+  var match = String(value || "").toLowerCase().match(/(?:steam_app_|steam[-:]?)(\d{3,})/)
+  return match ? match[1] : ""
 }
 
 function hostStem(host) {
@@ -129,6 +135,7 @@ function scoreDesktopEntry(entry, appId, title, initialClass) {
   var startup = normalizeIdentity(startupClass)
   var host = webAppHost(appRaw) || webAppHost(initialRaw)
   var stem = hostStem(host)
+  var steamId = steamAppId(appRaw) || steamAppId(initialRaw)
   var score = 0
 
   if (isGenericLabel(entryId) || isGenericLabel(entryName)) score -= 1400
@@ -144,6 +151,12 @@ function scoreDesktopEntry(entry, appId, title, initialClass) {
     if (id === normalizeIdentity(stem)) score += 1800
     if (name === normalizeIdentity(stem)) score += 1700
     if (containsWord(entryId, stem) || containsWord(entryName, stem)) score += 700
+  }
+
+  if (steamId) {
+    if (entryId.indexOf(steamId) >= 0) score += 3000
+    if (execString.indexOf("-applaunch " + steamId) >= 0
+        || execString.indexOf("rungameid/" + steamId) >= 0) score += 3400
   }
 
   if (id.length >= 4 && app.indexOf(id) >= 0) score += 520
@@ -197,6 +210,53 @@ function displayName(entry, appId, title) {
   return humanizeAppId(appId)
 }
 
+function foldSearch(value) {
+  var text = String(value || "").toLowerCase()
+  if (typeof text.normalize === "function")
+    text = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  return text.replace(/\s+/g, " ").trim()
+}
+
+function wordStartsWith(text, token) {
+  var words = foldSearch(text).split(/[^a-z0-9]+/)
+  for (var i = 0; i < words.length; i++) {
+    if (words[i].indexOf(token) === 0) return true
+  }
+  return false
+}
+
+function fieldTokenScore(value, token, exactScore, prefixScore, wordScore, containsScore) {
+  var field = foldSearch(value)
+  if (!field) return -1
+  if (field === token) return exactScore
+  if (field.indexOf(token) === 0) return prefixScore
+  if (wordStartsWith(field, token)) return wordScore
+  if (field.indexOf(token) >= 0) return containsScore
+  return -1
+}
+
+function searchScore(query, appName, title, appId, workspaceName, monitorName) {
+  var needle = foldSearch(query)
+  if (!needle) return 0
+
+  var tokens = needle.split(/\s+/)
+  var total = foldSearch(appName) === needle ? 10000 : 0
+
+  for (var i = 0; i < tokens.length; i++) {
+    var token = tokens[i]
+    var best = Math.max(
+      fieldTokenScore(appName, token, 2400, 2100, 1900, 1700),
+      fieldTokenScore(title, token, 1500, 1350, 1200, 1050),
+      fieldTokenScore(appId, token, 900, 820, 740, 660),
+      fieldTokenScore(workspaceName, token, 520, 470, 420, 370),
+      fieldTokenScore(monitorName, token, 320, 290, 260, 230))
+    if (best < 0) return -1
+    total += best
+  }
+
+  return total
+}
+
 function moveSpatial(index, count, columns, direction) {
   if (count <= 0) return -1
 
@@ -247,8 +307,10 @@ if (typeof module !== "undefined") {
     humanizeAppId: humanizeAppId,
     normalizeIdentity: normalizeIdentity,
     webAppHost: webAppHost,
+    steamAppId: steamAppId,
     scoreDesktopEntry: scoreDesktopEntry,
     bestDesktopEntry: bestDesktopEntry,
-    displayName: displayName
+    displayName: displayName,
+    searchScore: searchScore
   }
 }

@@ -25,16 +25,46 @@ Item {
   property int selectedIndex: -1
   property string selectedAddress: ""
   property string pendingActivationAddress: ""
+  property int activationAttempt: 0
+  property string previousFocusAddress: ""
+  property string closeReason: "cancel"
+  property int closeCount: 0
   property var targetScreen: null
   property var recentAddresses: []
+  property int modelGeneration: 0
+  property bool previewRefreshAllRequested: false
+  property double openStartedAt: 0
+  property int openingLatencyMs: 0
 
   readonly property string pluginId: "local.task-view"
   readonly property int currentWorkspaceId: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : -1
   readonly property string focusedMonitorName: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
   readonly property string currentWorkspaceName: Hyprland.focusedWorkspace
     ? String(Hyprland.focusedWorkspace.name || Hyprland.focusedWorkspace.id) : ""
+  readonly property int totalWindowCount: (Hyprland.toplevels.values || []).length
   readonly property var windowRows: buildWindowRows()
   readonly property var workspaceRows: buildWorkspaceRows()
+
+  ScriptModel {
+    id: stableWindowModel
+    values: root.windowRows
+    objectProp: "address"
+  }
+
+  ScriptModel {
+    id: stableWorkspaceModel
+    values: root.workspaceRows
+    objectProp: "id"
+  }
+
+  PreviewScheduler {
+    id: previewScheduler
+    intervalMs: 24
+    onCaptureRequested: function(address, generation) {
+      var card = root.cardForAddress(address)
+      if (card && root.opened) card.requestPreview(generation)
+    }
+  }
 
   function parsePayload(payloadJson) {
     if (!payloadJson) return ({})
@@ -70,35 +100,52 @@ Item {
     readyTimer.stop()
     reconcileTimer.stop()
     positionTimer.stop()
+    previewScheduleTimer.stop()
+    previewScheduler.cancel()
     activationTimer.stop()
     activationFallbackTimer.stop()
     root.pendingActivationAddress = ""
     root.targetScreen = focusedScreen()
+    if (!root.targetScreen) {
+      root.opened = false
+      root.surfaceVisible = false
+      root.phase = "closed"
+      return
+    }
     root.allWorkspaces = args.allWorkspaces === undefined
       ? configuredAllWorkspaces() : args.allWorkspaces !== false
     root.workspaceFilter = root.allWorkspaces ? -1 : root.currentWorkspaceId
     root.query = ""
+    root.closeReason = "cancel"
+    root.openStartedAt = Date.now()
+    root.openingLatencyMs = 0
     root.phase = "loading"
     root.surfaceVisible = true
     root.opened = true
 
     var active = Hyprland.activeToplevel
+    root.previousFocusAddress = active ? String(active.address || "") : ""
     root.selectedAddress = active ? String(active.address || "") : ""
     root.reconcileSelection()
 
     readyTimer.restart()
   }
 
-  function close() {
+  function close(reason) {
     if (!root.surfaceVisible || root.phase === "closing") return
+    root.closeReason = reason || "external"
+    root.closeCount += 1
     root.opened = false
     root.phase = "closing"
     root.query = ""
+    root.previewRefreshAllRequested = false
+    previewScheduleTimer.stop()
+    previewScheduler.cancel()
     closeTimer.restart()
   }
 
   function toggle(payloadJson) {
-    if (root.opened) root.close()
+    if (root.opened) root.close("toggle")
     else root.open(payloadJson || "{}")
   }
 
@@ -141,7 +188,7 @@ Item {
   function buildWindowRows() {
     var values = Hyprland.toplevels.values || []
     var rows = []
-    var needle = root.query.toLowerCase().trim()
+    var needle = root.query.trim()
 
     for (var i = 0; i < values.length; i++) {
       var toplevel = values[i]
@@ -154,11 +201,14 @@ Item {
       var title = root.titleFor(toplevel)
       var entry = root.desktopEntryFor(toplevel, appId, title)
       var appName = TaskViewModel.displayName(entry, appId, title)
-      if (needle && (appName + " " + appId + " " + title).toLowerCase().indexOf(needle) === -1)
-        continue
-
       var snapshot = toplevel.lastIpcObject || ({})
       var monitor = toplevel.monitor
+      var workspaceName = workspace ? String(workspace.name || workspace.id) : "?"
+      var monitorName = monitor ? String(monitor.name || "") : ""
+      var searchScore = TaskViewModel.searchScore(
+        needle, appName, title, appId, workspaceName, monitorName)
+      if (searchScore < 0) continue
+
       rows.push({
         toplevel: toplevel,
         address: String(toplevel.address || ""),
@@ -167,16 +217,19 @@ Item {
         title: title,
         iconSource: root.iconSourceFor(entry),
         workspaceId: workspaceId,
-        workspaceName: workspace ? String(workspace.name || workspace.id) : "?",
-        monitorName: monitor ? String(monitor.name || "") : "",
+        workspaceName: workspaceName,
+        monitorName: monitorName,
         urgent: toplevel.urgent === true,
         active: toplevel.activated === true,
         sameWorkspace: workspaceId === root.currentWorkspaceId,
-        recency: root.recencyRank(String(toplevel.address || ""), snapshot)
+        recency: root.recencyRank(String(toplevel.address || ""), snapshot),
+        searchScore: searchScore
       })
     }
 
     rows.sort(function(left, right) {
+      if (needle && left.searchScore !== right.searchScore)
+        return right.searchScore - left.searchScore
       if (left.active !== right.active) return left.active ? -1 : 1
       if (left.recency !== right.recency) return left.recency - right.recency
       if (left.sameWorkspace !== right.sameWorkspace) return left.sameWorkspace ? -1 : 1
@@ -206,9 +259,95 @@ Item {
     return rows
   }
 
+  function workspaceFilterOptions() {
+    var options = root.allWorkspaces ? [-1] : []
+    for (var i = 0; i < root.workspaceRows.length; i++)
+      options.push(root.workspaceRows[i].id)
+    return options
+  }
+
+  function cycleWorkspaceFilter(delta) {
+    var options = root.workspaceFilterOptions()
+    if (options.length === 0) return
+    var current = options.indexOf(root.workspaceFilter)
+    if (current < 0) current = 0
+    var next = (current + delta + options.length) % options.length
+    root.workspaceFilter = options[next]
+  }
+
+  function filterWorkspaceNumber(number) {
+    for (var i = 0; i < root.workspaceRows.length; i++) {
+      if (root.workspaceRows[i].id === number) {
+        root.workspaceFilter = number
+        return
+      }
+    }
+  }
+
+  function reconcileWorkspaceFilter() {
+    if (root.workspaceFilter === -1) return
+    var values = Hyprland.workspaces.values || []
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] && values[i].id === root.workspaceFilter) return
+    }
+    root.workspaceFilter = root.allWorkspaces ? -1 : root.currentWorkspaceId
+  }
+
+  function cardForAddress(address) {
+    for (var i = 0; i < windowRepeater.count; i++) {
+      var card = windowRepeater.itemAt(i)
+      if (card && card.address === address) return card
+    }
+    return null
+  }
+
+  function prioritizedPreviewAddresses(onlyMissing) {
+    var result = []
+    var seen = ({})
+
+    function add(address) {
+      address = String(address || "")
+      if (!address || seen[address]) return
+      var card = root.cardForAddress(address)
+      if (onlyMissing && card && card.captureState !== "idle") return
+      seen[address] = true
+      result.push(address)
+    }
+
+    add(root.selectedAddress)
+
+    for (var i = 0; i < root.windowRows.length; i++) {
+      var visibleCard = root.cardForAddress(root.windowRows[i].address)
+      if (visibleCard && visibleCard.y + visibleCard.height >= windowGrid.contentY
+          && visibleCard.y <= windowGrid.contentY + windowGrid.height)
+        add(root.windowRows[i].address)
+    }
+
+    for (var j = 0; j < root.windowRows.length; j++) {
+      if (root.windowRows[j].workspaceId === root.currentWorkspaceId)
+        add(root.windowRows[j].address)
+    }
+    for (var k = 0; k < root.windowRows.length; k++) add(root.windowRows[k].address)
+    return result
+  }
+
+  function requestPreviewSchedule(refreshAll) {
+    if (!root.opened || root.phase !== "ready") return
+    root.previewRefreshAllRequested = root.previewRefreshAllRequested || refreshAll === true
+    previewScheduleTimer.restart()
+  }
+
+  function runPreviewSchedule() {
+    if (!root.opened || root.phase !== "ready") return
+    var refreshAll = root.previewRefreshAllRequested
+    root.previewRefreshAllRequested = false
+    previewScheduler.replace(root.prioritizedPreviewAddresses(!refreshAll))
+  }
+
   function rememberActive(toplevel) {
     if (!toplevel || !toplevel.address) return
     var address = String(toplevel.address)
+    if (root.recentAddresses.length > 0 && root.recentAddresses[0] === address) return
     var next = [address]
     for (var i = 0; i < root.recentAddresses.length && next.length < 64; i++) {
       if (root.recentAddresses[i] !== address) next.push(root.recentAddresses[i])
@@ -237,6 +376,11 @@ Item {
       return
     }
 
+    if (root.selectedIndex >= 0) {
+      root.setSelection(Math.min(root.selectedIndex, root.windowRows.length - 1))
+      return
+    }
+
     var active = Hyprland.activeToplevel
     var activeIndex = root.indexForAddress(active ? String(active.address || "") : "")
     root.setSelection(activeIndex >= 0 ? activeIndex : 0)
@@ -250,6 +394,8 @@ Item {
     }
     root.selectedIndex = Math.max(0, Math.min(index, root.windowRows.length - 1))
     root.selectedAddress = root.windowRows[root.selectedIndex].address
+    if (root.opened && root.phase === "ready")
+      previewScheduler.prioritize(root.selectedAddress)
     positionTimer.restart()
   }
 
@@ -281,12 +427,28 @@ Item {
     }
   }
 
+  function beginActivation(address) {
+    if (!address) return
+    root.pendingActivationAddress = address
+    root.activationAttempt = 0
+    activationTimer.restart()
+  }
+
   function finishActivation(address) {
     var current = root.findToplevel(address)
     if (!current) {
       root.pendingActivationAddress = ""
       return
     }
+
+    var workspace = current.workspace
+    if (workspace && !workspace.active && root.activationAttempt < 3) {
+      root.activationAttempt += 1
+      workspace.activate()
+      activationTimer.restart()
+      return
+    }
+
     if (current.wayland) {
       current.wayland.activate()
       activationFallbackTimer.restart()
@@ -300,11 +462,8 @@ Item {
     if (index < 0 || index >= root.windowRows.length) return
     var row = root.windowRows[index]
     var address = row.address
-    var workspace = row.toplevel ? row.toplevel.workspace : null
-    root.close()
-    root.pendingActivationAddress = address
-    if (workspace && !workspace.active) workspace.activate()
-    activationTimer.restart()
+    root.close("activate")
+    root.beginActivation(address)
   }
 
   function ensureSelectionVisible() {
@@ -327,11 +486,15 @@ Item {
   function debugState() {
     var loadedCards = 0
     var previewsReady = 0
+    var previewsCapturing = 0
+    var previewsFailed = 0
     for (var i = 0; i < root.windowRows.length; i++) {
       var card = windowRepeater.itemAt(i)
       if (!card) continue
       loadedCards++
       if (card["previewAvailable"] === true) previewsReady++
+      if (card["captureState"] === "capturing") previewsCapturing++
+      if (card["captureState"] === "failed") previewsFailed++
     }
     return JSON.stringify({
       opened: root.opened,
@@ -342,12 +505,24 @@ Item {
       columns: windowGrid.columns,
       loadedCards: loadedCards,
       previewsReady: previewsReady,
+      previewsCapturing: previewsCapturing,
+      previewsFailed: previewsFailed,
+      previewQueue: previewScheduler.queuedCount,
+      openingLatencyMs: root.openingLatencyMs,
+      modelGeneration: root.modelGeneration,
+      closeReason: root.closeReason,
+      closeCount: root.closeCount,
       workspaceFilter: root.workspaceFilter,
       focusedMonitor: root.focusedMonitorName
     })
   }
 
-  onWindowRowsChanged: reconcileTimer.restart()
+  onWindowRowsChanged: {
+    root.modelGeneration += 1
+    reconcileTimer.restart()
+    root.requestPreviewSchedule(false)
+  }
+  onWorkspaceRowsChanged: workspaceReconcileTimer.restart()
 
   Connections {
     target: Hyprland
@@ -355,7 +530,9 @@ Item {
       root.rememberActive(Hyprland.activeToplevel)
     }
     function onFocusedMonitorChanged() {
-      if (root.opened) root.targetScreen = root.focusedScreen()
+      if (!root.opened) return
+      var nextScreen = root.focusedScreen()
+      if (nextScreen) root.targetScreen = nextScreen
     }
   }
 
@@ -370,6 +547,8 @@ Item {
     onTriggered: {
       root.surfaceVisible = false
       root.phase = "closed"
+      if (root.closeReason !== "activate" && root.previousFocusAddress)
+        root.beginActivation(root.previousFocusAddress)
     }
   }
 
@@ -379,8 +558,10 @@ Item {
     onTriggered: {
       if (!root.opened) return
       root.phase = "ready"
+      root.openingLatencyMs = Math.max(0, Date.now() - root.openStartedAt)
       root.reconcileSelection()
       keyCatcher.forceActiveFocus()
+      root.requestPreviewSchedule(true)
     }
   }
 
@@ -391,6 +572,18 @@ Item {
   }
 
   Timer {
+    id: workspaceReconcileTimer
+    interval: 0
+    onTriggered: root.reconcileWorkspaceFilter()
+  }
+
+  Timer {
+    id: previewScheduleTimer
+    interval: 0
+    onTriggered: root.runPreviewSchedule()
+  }
+
+  Timer {
     id: positionTimer
     interval: 0
     onTriggered: root.ensureSelectionVisible()
@@ -398,7 +591,7 @@ Item {
 
   Timer {
     id: activationTimer
-    interval: 45
+    interval: 35
     onTriggered: root.finishActivation(root.pendingActivationAddress)
   }
 
@@ -447,7 +640,7 @@ Item {
     MouseArea {
       anchors.fill: parent
       enabled: root.opened
-      onClicked: root.close()
+      onClicked: root.close("backdrop")
     }
 
     Item {
@@ -477,10 +670,26 @@ Item {
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Escape) {
-            root.close()
+            root.close("escape")
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.activateIndex(root.selectedIndex)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_Left) {
+            root.cycleWorkspaceFilter(-1)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_Right) {
+            root.cycleWorkspaceFilter(1)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_A && root.allWorkspaces) {
+            root.workspaceFilter = -1
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+            root.filterWorkspaceNumber(event.key - Qt.Key_0)
             event.accepted = true
           } else if (event.key === Qt.Key_Left) {
             root.moveSelection("left")
@@ -533,7 +742,10 @@ Item {
           }
 
           Text {
-            text: root.windowRows.length + (root.windowRows.length === 1 ? " window" : " windows")
+            text: ((root.query || root.workspaceFilter !== -1)
+              ? root.windowRows.length + " of " + root.totalWindowCount
+              : root.totalWindowCount)
+              + (root.totalWindowCount === 1 ? " window" : " windows")
               + (root.currentWorkspaceName ? "  ·  Workspace " + root.currentWorkspaceName : "")
             color: Color.muted
             font.family: Style.font.menuFamily
@@ -629,7 +841,7 @@ Item {
           }
 
           Repeater {
-            model: root.workspaceRows
+            model: stableWorkspaceModel
 
             delegate: WorkspaceTab {
               id: workspaceButton
@@ -662,6 +874,7 @@ Item {
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
           interactive: metrics.contentHeight > height
+          onMovementEnded: root.requestPreviewSchedule(false)
           contentWidth: width
           contentHeight: Math.max(height, metrics.contentHeight)
 
@@ -685,7 +898,7 @@ Item {
 
             Repeater {
               id: windowRepeater
-              model: root.windowRows
+              model: stableWindowModel
 
               delegate: WindowCard {
                 id: windowCard
@@ -705,6 +918,7 @@ Item {
                   + gridRow * (height + windowGrid.gap)
                 width: windowGrid.metrics.cardWidth
                 height: windowGrid.metrics.cardHeight
+                address: modelData.address
                 toplevel: modelData.toplevel
                 appId: modelData.appId
                 appName: modelData.appName
@@ -790,6 +1004,7 @@ Item {
           Repeater {
             model: [
               { keys: "← ↑ ↓ →", label: "Navigate" },
+              { keys: "Ctrl+← →", label: "Workspaces" },
               { keys: "Enter", label: "Open" },
               { keys: "Esc", label: "Close" }
             ]
