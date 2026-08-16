@@ -15,13 +15,17 @@ service.
 
 - Windows from all workspaces in one fullscreen overview
 - Real single-frame window previews
-- App names, icons, titles, workspace badges, and monitor badges
-- Responsive grid for small and large window counts
+- Reliable app names and icons, including Omarchy Chromium web apps and
+  generic Quickshell containers
+- App titles, active-state indicators, workspace badges, and monitor badges
+- Height-aware responsive grid with centered incomplete rows and vertical
+  scrolling only after cards reach a usable minimum size
 - Spatial arrow-key navigation
 - `Tab`, `Shift+Tab`, `Enter`, and `Escape` support
+- Keyboard workspace switching with `Ctrl+Left`, `Ctrl+Right`, and `Ctrl+1…9`
 - Mouse hover, click, wheel scrolling, and backdrop dismissal
-- Workspace filter strip
-- Type-to-search by app name, app ID, or window title
+- Theme-aware workspace tabs with window counts, active state, and urgency
+- Ranked type-to-search by app name, title, app ID, workspace, or monitor
 - Initial selection on the currently focused window
 - Native Omarchy colors, typography, spacing, borders, and animations
 - Graceful icon-and-title fallback when a preview is unavailable
@@ -128,6 +132,9 @@ close Task View.
 | `←` `→` `↑` `↓` | Move spatially through the window grid |
 | `Tab` | Select the next window |
 | `Shift+Tab` | Select the previous window |
+| `Ctrl+←` / `Ctrl+→` | Cycle through workspace filters |
+| `Ctrl+1` … `Ctrl+9` | Show that numbered workspace |
+| `Ctrl+A` | Return to all windows |
 | `Enter` | Activate the selected window |
 | `Escape` | Close without changing the active window |
 | Type text | Filter by app name, app ID, or title |
@@ -179,11 +186,24 @@ The shell watches this file and reloads changes automatically.
 
 Task View reads the reactive `Hyprland.toplevels`, `Hyprland.workspaces`, and
 `Hyprland.monitors` models exposed by Quickshell. Opening, closing, moving, or
-renaming a window updates the overview without timer-based polling.
+renaming a window updates the overview without timer-based polling. Opening
+the overlay does not force-refresh these models, avoiding a full delegate and
+preview rebuild on every `Super+Tab` press.
 
-Desktop metadata comes from `DesktopEntries.heuristicLookup()`. Icons use the
-shared Omarchy application library with the standard application icon as a
-fallback.
+Desktop metadata is resolved from the live `DesktopEntries` model. The resolver
+scores the app ID, initial class, desktop-entry ID, `StartupWMClass`, executable,
+Steam application ID, and—when applicable—the domain embedded in Chromium,
+Chrome, Brave, and Edge web-app classes.
+Window titles are used only as a low-priority display hint for generic
+containers such as Quickshell, never as window identity. Icons use Omarchy's
+shared application library with the standard application icon as a fallback.
+
+### Theme integration
+
+The overlay consumes the active Omarchy `Color`, `Style`, and `Border` tokens
+for its backdrop, typography, spacing, state fills, focus border, urgency, and
+accent. It follows theme changes without maintaining a second palette or
+hard-coded dark theme.
 
 ### Window activation
 
@@ -208,20 +228,32 @@ local.task-view/
 ├── manifest.json          Plugin metadata and overlay entry point
 ├── Overview.qml           Lifecycle, window model, layout, input, and focus
 ├── WindowCard.qml         Preview, metadata, badges, and pointer interaction
-├── TaskViewModel.js       Grid sizing and navigation algorithms
+├── WorkspaceTab.qml       Theme-aware workspace filter tab
+├── PreviewScheduler.qml   Deduplicated, paced one-frame capture queue
+├── TaskViewModel.js       Grid sizing, navigation, and app recognition
 ├── task-view.lua          Optional Super+Tab integration
 ├── tests/
-│   └── model.test.mjs     Deterministic model tests
+│   ├── model.test.mjs     Grid, navigation, search, and recognition tests
+│   └── tst_previewscheduler.qml  Capture queue tests
 ├── README.md
 └── LICENSE
 ```
 
 ## Previews, performance, and privacy
 
-- Each visible card captures one frame with `live: false`.
+- Cards capture one frame with `live: false` through a paced queue. The selected
+  card and cards already visible in the viewport are prioritized.
 - Captures begin only after the overlay becomes interactive.
-- Closing Task View clears every capture source immediately.
+- Cards are keyed by immutable Hyprland address through `ScriptModel`, so model
+  changes update existing delegates instead of destroying and recreating every
+  preview surface.
+- The latest static frame stays in memory while its card and toplevel exist so
+  reopening the overview does not flash from fallback content to a new frame.
+- No frames are captured while Task View is closed; reopening requests one
+  refresh without clearing the previously displayed frame.
 - Preview aspect ratios are preserved.
+- `ScreencopyView.constraintSize` performs the native aspect-fit calculation,
+  avoiding geometry changes while a frame is arriving.
 - The cursor is not included in previews.
 - Preview content remains in memory and is never written to disk.
 - There is no `hyprctl clients` render loop or process spawned per card.
@@ -282,8 +314,9 @@ capture.
 omarchy-shell shell call local.task-view debugState '' | jq
 ```
 
-The result includes window count, selected index, grid columns, monitor, and
-preview readiness. It does not expose window titles or captured content.
+The result includes window count, selected index, grid columns, monitor,
+opening latency, preview queue length, and capture states. It does not expose
+window titles or captured content.
 
 ## Development and validation
 
@@ -298,8 +331,12 @@ Run the project checks from the repository root:
 
 ```bash
 node tests/model.test.mjs
+QT_QPA_PLATFORM=minimal QT_QPA_PLATFORMTHEME= GDK_BACKEND= \
+  DISPLAY= WAYLAND_DISPLAY= /usr/lib/qt6/bin/qmltestrunner \
+  -input tests -import .
 omarchy plugin validate "$PWD"
-/usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" Overview.qml WindowCard.qml
+/usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" -I "$PWD" \
+  Overview.qml WindowCard.qml WorkspaceTab.qml PreviewScheduler.qml
 luac -p task-view.lua
 ```
 
