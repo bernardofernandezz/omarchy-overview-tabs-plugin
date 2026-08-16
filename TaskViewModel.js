@@ -1,6 +1,9 @@
 function chooseColumns(width, height, count, gap, minWidth, maxWidth, previewAspect, footerHeight) {
-  if (count <= 1) return 1
+  return gridMetrics(width, height, count, gap, minWidth, maxWidth, previewAspect, footerHeight).columns
+}
 
+function gridMetrics(width, height, count, gap, minWidth, maxWidth, previewAspect, footerHeight) {
+  var itemCount = Math.max(0, Number(count) || 0)
   var usableWidth = Math.max(1, Number(width) || 1)
   var usableHeight = Math.max(1, Number(height) || 1)
   var spacing = Math.max(0, Number(gap) || 0)
@@ -8,32 +11,190 @@ function chooseColumns(width, height, count, gap, minWidth, maxWidth, previewAsp
   var maximum = Math.max(minimum, Number(maxWidth) || minimum)
   var aspect = Math.max(0.1, Number(previewAspect) || 1.6)
   var footer = Math.max(0, Number(footerHeight) || 0)
-  var maxColumns = Math.min(count, 6)
+
+  if (itemCount === 0) {
+    return {
+      columns: 1,
+      rows: 0,
+      cardWidth: Math.min(maximum, usableWidth),
+      cardHeight: 0,
+      contentHeight: 0
+    }
+  }
+
+  if (itemCount === 1) maximum = Math.max(maximum, Math.min(usableWidth, 860))
+  else if (itemCount === 2) maximum = Math.max(maximum, Math.min(usableWidth / 2, 720))
+
+  var maxColumns = Math.min(itemCount, 6)
   var best = null
 
   for (var columns = 1; columns <= maxColumns; columns++) {
-    var rows = Math.ceil(count / columns)
+    var rows = Math.ceil(itemCount / columns)
     var widthLimit = (usableWidth - spacing * (columns - 1)) / columns
     var rowHeightLimit = (usableHeight - spacing * (rows - 1)) / rows
     var heightWidthLimit = Math.max(0, rowHeightLimit - footer) * aspect
     var cardWidth = Math.min(maximum, widthLimit, heightWidthLimit)
     var cardHeight = cardWidth / aspect + footer
-    var totalHeight = rows * cardHeight + spacing * (rows - 1)
-    var fits = cardWidth >= minimum && totalHeight <= usableHeight
+    var contentHeight = rows * cardHeight + spacing * (rows - 1)
+    var fitsWidth = cardWidth >= minimum
+    var fitsHeight = contentHeight <= usableHeight
+    if (!fitsWidth || !fitsHeight) continue
 
-    if (!fits) continue
-
-    var emptySlots = rows * columns - count
-    var score = cardWidth * cardHeight - emptySlots * 250
+    var emptySlots = rows * columns - itemCount
+    var score = cardWidth * cardHeight - emptySlots * cardWidth * 0.08
     if (!best || score > best.score || (score === best.score && rows < best.rows)) {
-      best = { columns: columns, score: score, rows: rows }
+      best = {
+        columns: columns,
+        rows: rows,
+        cardWidth: cardWidth,
+        cardHeight: cardHeight,
+        contentHeight: contentHeight,
+        score: score
+      }
     }
   }
 
-  if (best) return best.columns
+  if (best) return best
 
-  return Math.max(1, Math.min(maxColumns,
+  var fallbackColumns = Math.max(1, Math.min(maxColumns,
     Math.floor((usableWidth + spacing) / (minimum + spacing))))
+  var fallbackRows = Math.ceil(itemCount / fallbackColumns)
+  var fallbackWidth = Math.min(maximum,
+    (usableWidth - spacing * (fallbackColumns - 1)) / fallbackColumns)
+  fallbackWidth = Math.max(Math.min(minimum, usableWidth), fallbackWidth)
+  var fallbackHeight = fallbackWidth / aspect + footer
+
+  return {
+    columns: fallbackColumns,
+    rows: fallbackRows,
+    cardWidth: fallbackWidth,
+    cardHeight: fallbackHeight,
+    contentHeight: fallbackRows * fallbackHeight + spacing * (fallbackRows - 1)
+  }
+}
+
+function normalizeIdentity(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\.desktop$/i, "")
+    .replace(/^org\.|^com\.|^io\.|^net\.|^dev\./, "")
+    .replace(/[^a-z0-9]+/g, "")
+}
+
+function identityWords(value) {
+  return String(value || "")
+    .replace(/\.desktop$/i, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(function(word) { return word.length > 0 })
+}
+
+function isGenericLabel(value) {
+  var label = normalizeIdentity(value)
+  return label === "" || label === "application" || label === "default"
+    || label === "quickshell" || label === "orgquickshell"
+}
+
+function webAppHost(value) {
+  var text = String(value || "").toLowerCase()
+  var match = text.match(/^(?:chrome|chromium)-([a-z0-9.-]+?)(?:__|_[^.]|-(?:default|profile))/)
+  return match ? match[1].replace(/^www\./, "") : ""
+}
+
+function hostStem(host) {
+  var parts = String(host || "").split(".")
+  if (parts.length < 2) return parts[0] || ""
+  return parts[parts.length - 2]
+}
+
+function containsWord(text, word) {
+  if (!word || word.length < 3) return false
+  return identityWords(text).indexOf(String(word).toLowerCase()) >= 0
+}
+
+function scoreDesktopEntry(entry, appId, title, initialClass) {
+  if (!entry) return -100000
+
+  var entryId = String(entry.id || "").replace(/\.desktop$/i, "")
+  var entryName = String(entry.name || "")
+  var startupClass = String(entry.startupClass || "")
+  var execString = String(entry.execString || "").toLowerCase()
+  var appRaw = String(appId || "")
+  var initialRaw = String(initialClass || "")
+  var app = normalizeIdentity(appRaw)
+  var initial = normalizeIdentity(initialRaw)
+  var id = normalizeIdentity(entryId)
+  var name = normalizeIdentity(entryName)
+  var startup = normalizeIdentity(startupClass)
+  var host = webAppHost(appRaw) || webAppHost(initialRaw)
+  var stem = hostStem(host)
+  var score = 0
+
+  if (isGenericLabel(entryId) || isGenericLabel(entryName)) score -= 1400
+
+  if (app && id === app) score += 2400
+  if (app && name === app) score += 2200
+  if (app && startup === app) score += 2600
+  if (initial && id === initial) score += 2300
+  if (initial && startup === initial) score += 2500
+
+  if (host) {
+    if (execString.indexOf(host) >= 0) score += 3200
+    if (id === normalizeIdentity(stem)) score += 1800
+    if (name === normalizeIdentity(stem)) score += 1700
+    if (containsWord(entryId, stem) || containsWord(entryName, stem)) score += 700
+  }
+
+  if (id.length >= 4 && app.indexOf(id) >= 0) score += 520
+  if (name.length >= 4 && app.indexOf(name) >= 0) score += 460
+  if (startup.length >= 4 && app.indexOf(startup) >= 0) score += 560
+  if (id.length >= 4 && initial.indexOf(id) >= 0) score += 480
+
+  if (isGenericLabel(appRaw) || isGenericLabel(initialRaw)) {
+    if (containsWord(title, entryId)) score += 480
+    if (containsWord(title, entryName)) score += 520
+  }
+
+  return score
+}
+
+function bestDesktopEntry(entries, appId, title, initialClass, heuristicEntry) {
+  var values = entries || []
+  var best = null
+  var bestScore = -100000
+
+  for (var i = 0; i < values.length; i++) {
+    var entry = values[i]
+    if (!entry) continue
+    var score = scoreDesktopEntry(entry, appId, title, initialClass)
+    if (score > bestScore) {
+      best = entry
+      bestScore = score
+    }
+  }
+
+  var heuristicScore = scoreDesktopEntry(heuristicEntry, appId, title, initialClass)
+  if (heuristicEntry && heuristicScore > bestScore) {
+    best = heuristicEntry
+    bestScore = heuristicScore
+  }
+
+  return bestScore >= 400 ? best : null
+}
+
+function displayName(entry, appId, title) {
+  var entryName = String((entry && entry.name) || "").trim()
+  if (entryName && !isGenericLabel(entryName)) return entryName
+
+  if (isGenericLabel(appId)) {
+    var cleanTitle = String(title || "")
+      .replace(/^\s*\(\d+\)\s*/, "")
+      .replace(/^\s+|\s+$/g, "")
+    if (cleanTitle) return cleanTitle.length > 42 ? cleanTitle.slice(0, 41) + "…" : cleanTitle
+  }
+
+  return humanizeAppId(appId)
 }
 
 function moveSpatial(index, count, columns, direction) {
@@ -80,8 +241,14 @@ function humanizeAppId(value) {
 if (typeof module !== "undefined") {
   module.exports = {
     chooseColumns: chooseColumns,
+    gridMetrics: gridMetrics,
     moveSpatial: moveSpatial,
     stepWrapped: stepWrapped,
-    humanizeAppId: humanizeAppId
+    humanizeAppId: humanizeAppId,
+    normalizeIdentity: normalizeIdentity,
+    webAppHost: webAppHost,
+    scoreDesktopEntry: scoreDesktopEntry,
+    bestDesktopEntry: bestDesktopEntry,
+    displayName: displayName
   }
 }

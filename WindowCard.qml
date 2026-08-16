@@ -19,10 +19,13 @@ Item {
   required property string monitorName
 
   property bool selected: false
+  property bool active: false
   property bool urgent: false
   property bool captureEnabled: false
   property bool showMonitor: false
-  property real previewAspect: 1.6
+  property var retainedCaptureSource: null
+  property bool fallbackArmed: false
+  property bool previewEverReady: false
 
   signal hovered(int index)
   signal activated(int index)
@@ -30,9 +33,61 @@ Item {
 
   readonly property bool hot: pointer.containsMouse
   readonly property bool previewAvailable: preview.hasContent
-  readonly property real footerHeight: Math.max(Style.space(58), Style.font.body + Style.font.caption + Style.space(24))
+  readonly property string subtitleText: root.title && root.title !== root.appName
+    ? root.title : root.appId
+  readonly property real footerHeight: Math.max(
+    Style.space(64), Style.font.body + Style.font.caption + Style.space(28))
 
-  scale: selected ? 1.012 : (hot ? 1.008 : 1.0)
+  function requestPreview() {
+    if (!root.captureEnabled) return
+
+    var nextSource = root.toplevel && root.toplevel.wayland
+      ? root.toplevel.wayland : null
+    if (!nextSource) {
+      root.fallbackArmed = true
+      return
+    }
+
+    fallbackDelay.restart()
+    if (root.retainedCaptureSource !== nextSource) {
+      root.previewEverReady = false
+      root.retainedCaptureSource = nextSource
+    } else if (preview.hasContent) {
+      preview.captureFrame()
+    } else if (!root.previewEverReady) {
+      // A previous one-shot request may have failed. Recreate the context only
+      // on the next overview opening, never in a retry loop.
+      root.retainedCaptureSource = null
+      Qt.callLater(function() {
+        if (root.captureEnabled && root.toplevel && root.toplevel.wayland === nextSource)
+          root.retainedCaptureSource = nextSource
+      })
+    }
+  }
+
+  onCaptureEnabledChanged: {
+    if (root.captureEnabled) Qt.callLater(root.requestPreview)
+    else fallbackDelay.stop()
+  }
+
+  onToplevelChanged: {
+    var nextSource = root.toplevel && root.toplevel.wayland
+      ? root.toplevel.wayland : null
+    if (root.retainedCaptureSource === nextSource) return
+    root.retainedCaptureSource = null
+    root.previewEverReady = false
+    root.fallbackArmed = false
+    if (root.captureEnabled) Qt.callLater(root.requestPreview)
+  }
+
+  Timer {
+    id: fallbackDelay
+    interval: 180
+    onTriggered: root.fallbackArmed = !preview.hasContent
+  }
+
+  z: selected ? 3 : (hot ? 2 : 1)
+  scale: selected ? 1.014 : (hot ? 1.008 : 1.0)
   transformOrigin: Item.Center
 
   Behavior on scale {
@@ -43,12 +98,12 @@ Item {
     id: surface
     anchors.fill: parent
     radius: Style.cornerRadius
-    color: root.selected ? Color.menu.selectedBackground : Color.menu.background
+    color: Color.menu.background
     borderSpec: root.selected
-      ? Border.controlSpec("focus", Color.menu.text, Color.accent, Color.urgent)
-      : (root.hot
-        ? Border.controlSpec("hover", Color.menu.text, Color.accent, Color.urgent)
-        : Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(1))))
+      ? Border.hyprlandActiveSpec(Color.accent, Math.max(2, Style.space(2)))
+      : root.hot
+        ? Border.controlSpec("hover-cursor", Color.menu.text, Color.accent, Color.urgent)
+        : Border.flat(Util.alpha(Color.menu.text, 0.16), Math.max(1, Style.space(1)))
 
     Rectangle {
       id: previewFrame
@@ -57,63 +112,122 @@ Item {
       anchors.right: parent.right
       anchors.bottom: footer.top
       anchors.margins: Math.max(1, surface.borderTop)
-      color: Util.alpha(Color.background, 0.72)
+      color: Color.background
       clip: true
 
       ScreencopyView {
         id: preview
-        captureSource: root.captureEnabled && root.toplevel && root.toplevel.wayland
-          ? root.toplevel.wayland : null
+        captureSource: root.retainedCaptureSource
         paintCursor: false
         live: false
-        visible: hasContent
+        opacity: hasContent ? 1 : 0
         anchors.centerIn: parent
+        constraintSize: Qt.size(previewFrame.width, previewFrame.height)
+        width: implicitWidth
+        height: implicitHeight
 
-        readonly property real imageAspect: sourceSize.height > 0
-          ? sourceSize.width / sourceSize.height : root.previewAspect
-        width: imageAspect > parent.width / Math.max(1, parent.height)
-          ? parent.width : parent.height * imageAspect
-        height: imageAspect > parent.width / Math.max(1, parent.height)
-          ? parent.width / imageAspect : parent.height
+        Behavior on opacity {
+          NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+        }
+
+        onHasContentChanged: {
+          if (hasContent) {
+            fallbackDelay.stop()
+            root.previewEverReady = true
+            root.fallbackArmed = false
+          } else if (root.captureEnabled) {
+            fallbackDelay.restart()
+          }
+        }
+
+        onStopped: root.fallbackArmed = true
+      }
+
+      Rectangle {
+        anchors.fill: parent
+        visible: preview.hasContent && !root.selected && !root.hot
+        color: Util.alpha(Color.background, 0.08)
       }
 
       Column {
         anchors.centerIn: parent
-        width: Math.min(parent.width - Style.space(36), Style.space(260))
-        spacing: Style.space(12)
-        visible: !preview.hasContent
+        width: Math.min(parent.width - Style.space(40), Style.space(280))
+        spacing: Style.space(10)
+        opacity: root.fallbackArmed && !preview.hasContent ? 1 : 0
 
-        IconImage {
+        Behavior on opacity {
+          NumberAnimation { duration: 90; easing.type: Easing.OutCubic }
+        }
+
+        Rectangle {
           anchors.horizontalCenter: parent.horizontalCenter
-          implicitSize: Math.min(Style.space(72), previewFrame.height * 0.32)
-          width: implicitSize
-          height: implicitSize
-          source: root.iconSource
-          asynchronous: true
-          opacity: 0.9
+          width: Math.min(Style.space(76), previewFrame.height * 0.34)
+          height: width
+          radius: Style.cornerRadius
+          color: Style.normalFill
+
+          IconImage {
+            anchors.centerIn: parent
+            width: parent.width * 0.62
+            height: width
+            source: root.iconSource
+            asynchronous: true
+            opacity: 0.9
+          }
         }
 
         Text {
           width: parent.width
           text: root.appName
           color: Color.menu.text
-          opacity: 0.66
+          opacity: 0.78
           font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.body
+          font.pixelSize: Style.font.subtitle
+          font.weight: Font.DemiBold
           horizontalAlignment: Text.AlignHCenter
           elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          text: "Preview unavailable"
+          color: Color.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
+        }
+      }
+
+      Rectangle {
+        visible: root.active
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.margins: Style.space(10)
+        width: activeLabel.implicitWidth + Style.space(12)
+        height: Math.max(Style.space(22), activeLabel.implicitHeight + Style.space(6))
+        radius: height / 2
+        color: Util.alpha(Color.background, 0.78)
+
+        Text {
+          id: activeLabel
+          anchors.centerIn: parent
+          text: "ACTIVE"
+          color: Color.accent
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          font.weight: Font.DemiBold
         }
       }
 
       Rectangle {
         visible: root.urgent
-        width: Style.space(7)
+        width: Style.space(8)
         height: width
         radius: width / 2
         color: Color.urgent
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.margins: Style.space(10)
+        anchors.margins: Style.space(11)
       }
     }
 
@@ -124,12 +238,20 @@ Item {
       anchors.bottom: parent.bottom
       height: root.footerHeight
 
+      Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Math.max(1, Style.space(1))
+        color: Util.alpha(Color.menu.text, 0.1)
+      }
+
       IconImage {
         id: appIcon
         anchors.left: parent.left
-        anchors.leftMargin: Style.space(12)
+        anchors.leftMargin: Style.space(14)
         anchors.verticalCenter: parent.verticalCenter
-        implicitSize: Style.space(28)
+        implicitSize: Style.space(31)
         width: implicitSize
         height: implicitSize
         source: root.iconSource
@@ -138,11 +260,11 @@ Item {
 
       Column {
         anchors.left: appIcon.right
-        anchors.leftMargin: Style.space(10)
+        anchors.leftMargin: Style.space(11)
         anchors.right: badges.left
-        anchors.rightMargin: Style.space(10)
+        anchors.rightMargin: Style.space(12)
         anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.space(2)
+        spacing: Style.space(3)
 
         Text {
           width: parent.width
@@ -156,9 +278,8 @@ Item {
 
         Text {
           width: parent.width
-          text: root.title || root.appId
-          color: Color.menu.text
-          opacity: 0.62
+          text: root.subtitleText
+          color: Color.muted
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -168,7 +289,7 @@ Item {
       Row {
         id: badges
         anchors.right: parent.right
-        anchors.rightMargin: Style.space(10)
+        anchors.rightMargin: Style.space(11)
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(5)
 
@@ -176,15 +297,14 @@ Item {
           visible: root.showMonitor && root.monitorName.length > 0
           width: monitorText.implicitWidth + Style.space(10)
           height: Math.max(Style.space(22), monitorText.implicitHeight + Style.space(6))
-          radius: Style.cornerRadius
+          radius: height / 2
           color: Style.normalFill
 
           Text {
             id: monitorText
             anchors.centerIn: parent
             text: root.monitorName
-            color: Color.menu.text
-            opacity: 0.62
+            color: Color.muted
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.caption
           }
@@ -193,7 +313,7 @@ Item {
         Rectangle {
           width: workspaceText.implicitWidth + Style.space(12)
           height: Math.max(Style.space(22), workspaceText.implicitHeight + Style.space(6))
-          radius: Style.cornerRadius
+          radius: height / 2
           color: root.selected ? Style.selectedAccentFill : Style.normalFill
 
           Text {
@@ -201,7 +321,7 @@ Item {
             anchors.centerIn: parent
             text: root.workspaceName || "?"
             color: root.selected ? Color.menu.selectedText : Color.menu.text
-            opacity: root.selected ? 1 : 0.7
+            opacity: root.selected ? 1 : 0.72
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.caption
             font.weight: Font.DemiBold
@@ -218,9 +338,6 @@ Item {
     cursorShape: Qt.PointingHandCursor
     onEntered: root.hovered(root.index)
     onClicked: root.activated(root.index)
-    onWheel: function(wheel) {
-      root.wheelRequested(wheel.angleDelta.y)
-      wheel.accepted = true
-    }
+    onWheel: function(wheel) { root.wheelRequested(wheel.angleDelta.y) }
   }
 }

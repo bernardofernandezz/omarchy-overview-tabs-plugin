@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls as QQC
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Wayland
@@ -30,6 +31,8 @@ Item {
   readonly property string pluginId: "local.task-view"
   readonly property int currentWorkspaceId: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : -1
   readonly property string focusedMonitorName: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+  readonly property string currentWorkspaceName: Hyprland.focusedWorkspace
+    ? String(Hyprland.focusedWorkspace.name || Hyprland.focusedWorkspace.id) : ""
   readonly property var windowRows: buildWindowRows()
   readonly property var workspaceRows: buildWorkspaceRows()
 
@@ -79,11 +82,6 @@ Item {
     root.surfaceVisible = true
     root.opened = true
 
-    Hyprland.refreshToplevels()
-    Hyprland.refreshWorkspaces()
-    if (root.shell && root.shell.appLibrary)
-      root.shell.appLibrary.refreshIcons()
-
     var active = Hyprland.activeToplevel
     root.selectedAddress = active ? String(active.address || "") : ""
     root.reconcileSelection()
@@ -117,8 +115,12 @@ Item {
     return String(toplevel.title || (toplevel.wayland ? toplevel.wayland.title : "") || "")
   }
 
-  function desktopEntryFor(appId) {
-    return appId ? DesktopEntries.heuristicLookup(appId) : null
+  function desktopEntryFor(toplevel, appId, title) {
+    var snapshot = toplevel ? (toplevel.lastIpcObject || ({})) : ({})
+    var initialClass = String(snapshot.initialClass || snapshot.class || "")
+    var heuristic = appId ? DesktopEntries.heuristicLookup(appId) : null
+    return TaskViewModel.bestDesktopEntry(
+      DesktopEntries.applications.values || [], appId, title, initialClass, heuristic)
   }
 
   function iconSourceFor(entry) {
@@ -150,8 +152,8 @@ Item {
 
       var appId = root.appIdFor(toplevel)
       var title = root.titleFor(toplevel)
-      var entry = root.desktopEntryFor(appId)
-      var appName = entry ? String(entry.name || appId) : TaskViewModel.humanizeAppId(appId)
+      var entry = root.desktopEntryFor(toplevel, appId, title)
+      var appName = TaskViewModel.displayName(entry, appId, title)
       if (needle && (appName + " " + appId + " " + title).toLowerCase().indexOf(needle) === -1)
         continue
 
@@ -305,11 +307,28 @@ Item {
     activationTimer.restart()
   }
 
+  function ensureSelectionVisible() {
+    if (root.selectedIndex < 0) return
+    var card = windowRepeater.itemAt(root.selectedIndex)
+    if (!card) return
+
+    var margin = Style.space(12)
+    var top = card.y - margin
+    var bottom = card.y + card.height + margin
+    if (top < windowGrid.contentY) {
+      windowGrid.contentY = Math.max(0, top)
+    } else if (bottom > windowGrid.contentY + windowGrid.height) {
+      windowGrid.contentY = Math.min(
+        Math.max(0, windowGrid.contentHeight - windowGrid.height),
+        bottom - windowGrid.height)
+    }
+  }
+
   function debugState() {
     var loadedCards = 0
     var previewsReady = 0
-    for (var i = 0; i < windowGrid.count; i++) {
-      var card = windowGrid.itemAtIndex(i)
+    for (var i = 0; i < root.windowRows.length; i++) {
+      var card = windowRepeater.itemAt(i)
       if (!card) continue
       loadedCards++
       if (card["previewAvailable"] === true) previewsReady++
@@ -374,10 +393,7 @@ Item {
   Timer {
     id: positionTimer
     interval: 0
-    onTriggered: {
-      if (root.selectedIndex >= 0)
-        windowGrid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
-    }
+    onTriggered: root.ensureSelectionVisible()
   }
 
   Timer {
@@ -412,8 +428,17 @@ Item {
 
     Rectangle {
       anchors.fill: parent
+      color: Color.background
+      opacity: root.opened ? 0.9 : 0
+      Behavior on opacity {
+        NumberAnimation { duration: root.opened ? 150 : 90; easing.type: Easing.OutCubic }
+      }
+    }
+
+    Rectangle {
+      anchors.fill: parent
       color: Color.menu.scrim
-      opacity: root.opened ? 1 : 0
+      opacity: root.opened ? 0.34 : 0
       Behavior on opacity {
         NumberAnimation { duration: root.opened ? 150 : 90; easing.type: Easing.OutCubic }
       }
@@ -427,8 +452,11 @@ Item {
 
     Item {
       id: viewport
-      anchors.fill: parent
-      anchors.margins: Math.max(Style.space(26), Math.min(panel.width, panel.height) * 0.035)
+      readonly property real edgeMargin: Math.max(
+        Style.space(24), Math.min(panel.width, panel.height) * 0.042)
+      width: Math.min(panel.width - edgeMargin * 2, Style.space(1760))
+      height: panel.height - edgeMargin * 2
+      anchors.centerIn: parent
       opacity: root.opened ? 1 : 0
       scale: root.opened ? 1 : 0.98
 
@@ -484,43 +512,100 @@ Item {
         }
       }
 
-      Row {
+      Item {
         id: header
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: Math.max(Style.space(44), titleLabel.implicitHeight)
-        spacing: Style.space(18)
+        height: Style.space(54)
 
-        Text {
-          id: titleLabel
+        Column {
+          anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          text: "Task View"
-          color: Color.menu.text
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.display
-          font.weight: Font.DemiBold
+          spacing: Style.space(3)
+
+          Text {
+            text: "Task View"
+            color: Color.menu.text
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.display
+            font.weight: Font.DemiBold
+          }
+
+          Text {
+            text: root.windowRows.length + (root.windowRows.length === 1 ? " window" : " windows")
+              + (root.currentWorkspaceName ? "  ·  Workspace " + root.currentWorkspaceName : "")
+            color: Color.muted
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.bodySmall
+          }
         }
 
-        Text {
+        BorderSurface {
+          id: searchSurface
+          anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          width: Math.max(0, parent.width - titleLabel.width - header.spacing)
-          text: root.query ? "Search: " + root.query : "Type to search windows…"
-          color: Color.menu.text
-          opacity: root.query ? 0.92 : 0.48
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
+          width: Math.min(Style.space(420), Math.max(Style.space(260), parent.width * 0.34))
+          height: Style.space(38)
+          radius: Style.cornerRadius
+          color: root.query
+            ? Style.focusFillFor(Color.menu.text, Color.accent, Color.urgent)
+            : Style.normalFillFor(Color.menu.text, Color.accent, Color.urgent)
+          borderSpec: Border.controlSpec(
+            root.query ? "focus" : "normal", Color.menu.text, Color.accent, Color.urgent)
+
+          Row {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(12)
+            anchors.rightMargin: Style.space(8)
+            spacing: Style.space(9)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "⌕"
+              color: root.query ? Color.menu.selectedText : Color.muted
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.heading
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - searchKey.width - Style.space(42)
+              text: root.query || "Search windows…"
+              color: root.query ? Color.menu.text : Color.muted
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+
+            Rectangle {
+              id: searchKey
+              anchors.verticalCenter: parent.verticalCenter
+              width: searchKeyLabel.implicitWidth + Style.space(10)
+              height: Style.space(22)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.menu.text, 0.08)
+
+              Text {
+                id: searchKeyLabel
+                anchors.centerIn: parent
+                text: root.query ? "⌫" : "type"
+                color: Color.muted
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
         }
       }
 
       Flickable {
         id: workspaceStrip
         anchors.top: header.bottom
-        anchors.topMargin: Style.space(10)
+        anchors.topMargin: Style.space(12)
         anchors.left: parent.left
         anchors.right: parent.right
-        height: Style.space(34)
+        height: Style.space(38)
         contentWidth: workspaceButtons.width
         contentHeight: height
         clip: true
@@ -529,78 +614,33 @@ Item {
 
         Row {
           id: workspaceButtons
+          x: Math.max(0, (workspaceStrip.width - width) / 2)
           height: parent.height
-          spacing: Style.space(7)
+          spacing: Style.space(8)
 
-          Rectangle {
+          WorkspaceTab {
             visible: root.allWorkspaces
-            width: allLabel.implicitWidth + Style.space(22)
-            height: parent.height
-            radius: Style.cornerRadius
-            color: root.workspaceFilter === -1 ? Color.menu.selectedBackground : Style.normalFill
-            border.color: root.workspaceFilter === -1 ? Color.menu.selectedText : "transparent"
-            border.width: root.workspaceFilter === -1 ? Math.max(1, Style.space(1)) : 0
-
-            Text {
-              id: allLabel
-              anchors.centerIn: parent
-              text: "All windows  " + Hyprland.toplevels.values.length
-              color: root.workspaceFilter === -1 ? Color.menu.selectedText : Color.menu.text
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.caption
-              font.weight: Font.DemiBold
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.workspaceFilter = -1
-            }
+            label: "All windows"
+            count: Hyprland.toplevels.values.length
+            selected: root.workspaceFilter === -1
+            active: false
+            urgent: false
+            onClicked: root.workspaceFilter = -1
           }
 
           Repeater {
             model: root.workspaceRows
 
-            delegate: Rectangle {
+            delegate: WorkspaceTab {
               id: workspaceButton
-              required property int index
               required property var modelData
 
-              readonly property bool chosen: root.workspaceFilter === modelData.id
-              width: workspaceLabel.implicitWidth + Style.space(22)
-              height: workspaceButtons.height
-              radius: Style.cornerRadius
-              color: chosen ? Color.menu.selectedBackground : Style.normalFill
-              border.color: chosen ? Color.menu.selectedText : "transparent"
-              border.width: chosen ? Math.max(1, Style.space(1)) : 0
-
-              Text {
-                id: workspaceLabel
-                anchors.centerIn: parent
-                text: workspaceButton.modelData.name + "  " + workspaceButton.modelData.count
-                color: workspaceButton.chosen ? Color.menu.selectedText : Color.menu.text
-                opacity: workspaceButton.modelData.active || workspaceButton.chosen ? 1 : 0.68
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.caption
-                font.weight: workspaceButton.modelData.focused ? Font.DemiBold : Font.Normal
-              }
-
-              Rectangle {
-                visible: workspaceButton.modelData.urgent
-                width: Style.space(5)
-                height: width
-                radius: width / 2
-                color: Color.urgent
-                anchors.top: parent.top
-                anchors.right: parent.right
-                anchors.margins: Style.space(5)
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.workspaceFilter = workspaceButton.modelData.id
-              }
+              label: "Workspace " + modelData.name
+              count: modelData.count
+              selected: root.workspaceFilter === modelData.id
+              active: modelData.focused || modelData.active
+              urgent: modelData.urgent
+              onClicked: root.workspaceFilter = workspaceButton.modelData.id
             }
           }
         }
@@ -612,58 +652,86 @@ Item {
         anchors.topMargin: Style.space(18)
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: helpText.top
+        anchors.bottom: helpBar.top
         anchors.bottomMargin: Style.space(14)
 
-        GridView {
+        Flickable {
           id: windowGrid
           anchors.fill: parent
           clip: true
-          model: root.windowRows
-          interactive: contentHeight > height
           boundsBehavior: Flickable.StopAtBounds
-          keyNavigationEnabled: false
-          highlightFollowsCurrentItem: false
-          currentIndex: root.selectedIndex
+          flickableDirection: Flickable.VerticalFlick
+          interactive: metrics.contentHeight > height
+          contentWidth: width
+          contentHeight: Math.max(height, metrics.contentHeight)
 
-          readonly property int gap: Style.space(14)
-          readonly property int columns: TaskViewModel.chooseColumns(
+          readonly property int gap: Style.space(16)
+          readonly property var metrics: TaskViewModel.gridMetrics(
             width, height, root.windowRows.length, gap, Style.space(250),
-            Style.space(560), 1.6, Style.space(62))
-          readonly property real rawCellWidth: columns > 0
-            ? width / columns - gap : width
-          cellWidth: columns > 0 ? width / columns : width
-          cellHeight: Math.max(Style.space(218), rawCellWidth / 1.6 + Style.space(62)) + gap
+            Style.space(620), 1.6, Style.space(64))
+          readonly property int columns: metrics.columns
+          readonly property real verticalOffset: metrics.contentHeight < height
+            ? (height - metrics.contentHeight) / 2 : 0
 
-          delegate: WindowCard {
-            required property var modelData
+          QQC.ScrollBar.vertical: QQC.ScrollBar {
+            policy: windowGrid.metrics.contentHeight > windowGrid.height
+              ? QQC.ScrollBar.AsNeeded : QQC.ScrollBar.AlwaysOff
+          }
 
-            width: windowGrid.rawCellWidth
-            height: windowGrid.cellHeight - windowGrid.gap
-            toplevel: modelData.toplevel
-            appId: modelData.appId
-            appName: modelData.appName
-            title: modelData.title
-            iconSource: modelData.iconSource
-            workspaceName: modelData.workspaceName
-            monitorName: modelData.monitorName
-            urgent: modelData.urgent
-            selected: index === root.selectedIndex
-            showMonitor: modelData.monitorName.length > 0
-              && modelData.monitorName !== root.focusedMonitorName
-            captureEnabled: root.opened && root.phase === "ready"
-            opacity: root.opened ? 1 : 0
+          Item {
+            id: gridCanvas
+            width: windowGrid.width
+            height: windowGrid.contentHeight
 
-            Behavior on opacity {
-              NumberAnimation { duration: 130; easing.type: Easing.OutCubic }
-            }
+            Repeater {
+              id: windowRepeater
+              model: root.windowRows
 
-            onHovered: function(nextIndex) { root.setSelection(nextIndex) }
-            onActivated: function(nextIndex) { root.activateIndex(nextIndex) }
-            onWheelRequested: function(delta) {
-              windowGrid.contentY = Math.max(0, Math.min(
-                windowGrid.contentHeight - windowGrid.height,
-                windowGrid.contentY - delta))
+              delegate: WindowCard {
+                id: windowCard
+                required property var modelData
+
+                readonly property int gridRow: Math.floor(index / windowGrid.columns)
+                readonly property int gridColumn: index % windowGrid.columns
+                readonly property int rowStart: gridRow * windowGrid.columns
+                readonly property int itemsInRow: Math.min(
+                  windowGrid.columns, root.windowRows.length - rowStart)
+                readonly property real rowWidth: itemsInRow * width
+                  + Math.max(0, itemsInRow - 1) * windowGrid.gap
+
+                x: (gridCanvas.width - rowWidth) / 2
+                  + gridColumn * (width + windowGrid.gap)
+                y: windowGrid.verticalOffset
+                  + gridRow * (height + windowGrid.gap)
+                width: windowGrid.metrics.cardWidth
+                height: windowGrid.metrics.cardHeight
+                toplevel: modelData.toplevel
+                appId: modelData.appId
+                appName: modelData.appName
+                title: modelData.title
+                iconSource: modelData.iconSource
+                workspaceName: modelData.workspaceName
+                monitorName: modelData.monitorName
+                active: modelData.active
+                urgent: modelData.urgent
+                selected: index === root.selectedIndex
+                showMonitor: modelData.monitorName.length > 0
+                  && modelData.monitorName !== root.focusedMonitorName
+                captureEnabled: root.opened && root.phase === "ready"
+                opacity: root.opened ? 1 : 0
+
+                Behavior on opacity {
+                  NumberAnimation { duration: 130; easing.type: Easing.OutCubic }
+                }
+
+                onHovered: function(nextIndex) { root.setSelection(nextIndex) }
+                onActivated: function(nextIndex) { root.activateIndex(nextIndex) }
+                onWheelRequested: function(delta) {
+                  windowGrid.contentY = Math.max(0, Math.min(
+                    Math.max(0, windowGrid.contentHeight - windowGrid.height),
+                    windowGrid.contentY - delta))
+                }
+              }
             }
           }
         }
@@ -671,7 +739,23 @@ Item {
         Column {
           anchors.centerIn: parent
           visible: root.windowRows.length === 0
-          spacing: Style.space(8)
+          spacing: Style.space(10)
+
+          Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Style.space(54)
+            height: width
+            radius: Style.cornerRadius
+            color: Style.normalFillFor(Color.menu.text, Color.accent, Color.urgent)
+
+            Text {
+              anchors.centerIn: parent
+              text: root.query ? "⌕" : "□"
+              color: Color.accent
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.display
+            }
+          }
 
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -685,27 +769,63 @@ Item {
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.query ? "Press Backspace to edit your search" : "Press Escape to return"
-            color: Color.menu.text
-            opacity: 0.5
+            color: Color.muted
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.caption
           }
         }
       }
 
-      Text {
-        id: helpText
+      Item {
+        id: helpBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: implicitHeight
-        text: "← ↑ ↓ →  Navigate     Enter  Open     Esc  Close"
-        color: Color.menu.text
-        opacity: 0.46
-        font.family: Style.font.menuFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
+        height: Style.space(26)
+
+        Row {
+          anchors.centerIn: parent
+          spacing: Style.space(18)
+
+          Repeater {
+            model: [
+              { keys: "← ↑ ↓ →", label: "Navigate" },
+              { keys: "Enter", label: "Open" },
+              { keys: "Esc", label: "Close" }
+            ]
+
+            delegate: Row {
+              required property var modelData
+              spacing: Style.space(7)
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: shortcutKey.implicitWidth + Style.space(10)
+                height: Style.space(22)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.menu.text, 0.08)
+
+                Text {
+                  id: shortcutKey
+                  anchors.centerIn: parent
+                  text: modelData.keys
+                  color: Color.menu.text
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.caption
+                  font.weight: Font.DemiBold
+                }
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.label
+                color: Color.muted
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+        }
       }
     }
   }
