@@ -1,6 +1,6 @@
 # Task View for Omarchy
 
-Task View is a native fullscreen window overview for Omarchy, inspired by
+Task View is a native fullscreen Mission Control for Omarchy, inspired by
 Windows Task View, macOS Mission Control, and GNOME Activities.
 
 Press `Super+Tab` to see every open window, move through the overview with the
@@ -22,13 +22,25 @@ service.
   scrolling only after cards reach a usable minimum size
 - Spatial arrow-key navigation
 - `Tab`, `Shift+Tab`, `Enter`, and `Escape` support
-- Keyboard workspace switching with `Ctrl+Left`, `Ctrl+Right`, and `Ctrl+1…9`
+- Workspace and recent-focus views, plus a compact 1–9 workspace minimap
+- Animated Workspaces/Recent control and keyed grid transitions when search,
+  workspace, or monitor filters reorganize the overview
+- Keyboard workspace filtering with `Ctrl+Left`, `Ctrl+Right`, and `Ctrl+1…9`
+- Move the selected window with `Shift+1…9` and undo moves with `Ctrl+Z`
+- Close a selected window with `Ctrl+W` or the card's close button
+- Hold `Space` for a larger quick peek without starting another capture stream
+- Optional `h`, `j`, `k`, `l` navigation
+- Monitor filtering and address-safe monitor moves on Hyprland's Lua dispatcher
 - Mouse hover, click, wheel scrolling, and backdrop dismissal
 - Theme-aware workspace tabs with window counts, active state, and urgency
-- Ranked type-to-search by app name, title, app ID, workspace, or monitor
+- Ranked fuzzy type-to-search by app name, title, app ID, workspace, or monitor
 - Initial selection on the currently focused window
 - Native Omarchy colors, typography, spacing, borders, and animations
 - Graceful icon-and-title fallback when a preview is unavailable
+- Pointer-motion gating that prevents selection churn when cards move under a
+  stationary cursor
+- Retained preview textures and a single overlay animation, avoiding the
+  flash caused by recapturing every card on each opening
 - No polling, persisted screenshots, or extra runtime dependencies
 
 ## Requirements
@@ -135,6 +147,13 @@ close Task View.
 | `Ctrl+←` / `Ctrl+→` | Cycle through workspace filters |
 | `Ctrl+1` … `Ctrl+9` | Show that numbered workspace |
 | `Ctrl+A` | Return to all windows |
+| `Ctrl+R` | Toggle workspace and recent-focus ordering |
+| `Alt+←` / `Alt+→` | Cycle monitor filters when multiple monitors exist |
+| `Shift+1` … `Shift+9` | Move the selected window to that workspace |
+| `Ctrl+Shift+←` / `Ctrl+Shift+→` | Move the selected window to the adjacent monitor |
+| `Ctrl+Z` | Undo the most recent workspace/monitor move |
+| `Ctrl+W` | Close the selected window |
+| Hold `Space` | Enlarge the selected preview temporarily |
 | `Enter` | Activate the selected window |
 | `Escape` | Close without changing the active window |
 | Type text | Filter by app name, app ID, or title |
@@ -143,6 +162,10 @@ close Task View.
 | Mouse click | Activate a window |
 | Mouse wheel | Scroll a large grid |
 | Backdrop click | Close without changing the active window |
+
+When `vimNavigation` is enabled, `h`, `j`, `k`, and `l` mirror the arrow keys
+while the search query is empty. It is disabled by default so typing always
+starts a search predictably.
 
 The overlay can also be controlled directly:
 
@@ -180,6 +203,24 @@ the setting to the entry created by `omarchy plugin enable`.
 
 The shell watches this file and reloads changes automatically.
 
+### Enable Vim navigation
+
+Add `vimNavigation` to the existing plugin entry in
+`~/.config/omarchy/shell.json`:
+
+```json
+{
+  "id": "local.task-view",
+  "vimNavigation": true
+}
+```
+
+It can also be enabled for one invocation:
+
+```bash
+omarchy-shell shell summon local.task-view '{"vimNavigation":true}'
+```
+
 ## How it works
 
 ### Window discovery
@@ -216,10 +257,22 @@ When a window is selected, Task View:
 
 Window titles are never used as identifiers.
 
+### Window management
+
+Close requests use the Wayland toplevel handle when available. Workspace moves
+use Hyprland's exact `address:0x…` selector, with the current Lua dispatcher and
+a legacy dispatcher fallback. Monitor moves are shown only when the installed
+Hyprland Lua dispatcher can target a specific window safely. The undo stack is
+in memory, bounded to 16 moves, and intentionally never attempts to restore a
+closed application.
+
 ### Multi-monitor behavior
 
 The overview opens on the currently focused monitor and includes windows from
-all monitors. Cards from another monitor display a monitor badge.
+all monitors. Cards from another monitor display a monitor badge. On setups
+with multiple monitors, the top strip adds display filters ordered by Hyprland's
+reported `x`/`y` topology; `Ctrl+Shift+Left/Right` moves the selected window to
+the adjacent display without following it.
 
 ### Plugin structure
 
@@ -228,12 +281,14 @@ local.task-view/
 ├── manifest.json          Plugin metadata and overlay entry point
 ├── Overview.qml           Lifecycle, window model, layout, input, and focus
 ├── WindowCard.qml         Preview, metadata, badges, and pointer interaction
+├── WindowActions.qml      Exact-address close/move dispatch and bounded undo
+├── ViewModeSwitch.qml     Animated Workspaces/Recent segmented control
 ├── WorkspaceTab.qml       Theme-aware workspace filter tab
 ├── PreviewScheduler.qml   Deduplicated, paced one-frame capture queue
 ├── TaskViewModel.js       Grid sizing, navigation, and app recognition
 ├── task-view.lua          Optional Super+Tab integration
 ├── tests/
-│   ├── model.test.mjs     Grid, navigation, search, and recognition tests
+│   ├── model.test.mjs     Grid, navigation, fuzzy search, and recognition tests
 │   └── tst_previewscheduler.qml  Capture queue tests
 ├── README.md
 └── LICENSE
@@ -249,8 +304,9 @@ local.task-view/
   preview surface.
 - The latest static frame stays in memory while its card and toplevel exist so
   reopening the overview does not flash from fallback content to a new frame.
-- No frames are captured while Task View is closed; reopening requests one
-  refresh without clearing the previously displayed frame.
+- No frames are captured while Task View is closed. Reopening reuses the last
+  retained frame; a new capture context is created only for a new source or
+  after a failed source is retried on a later session.
 - Preview aspect ratios are preserved.
 - `ScreencopyView.constraintSize` performs the native aspect-fit calculation,
   avoiding geometry changes while a frame is arriving.
@@ -336,7 +392,8 @@ QT_QPA_PLATFORM=minimal QT_QPA_PLATFORMTHEME= GDK_BACKEND= \
   -input tests -import .
 omarchy plugin validate "$PWD"
 /usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" -I "$PWD" \
-  Overview.qml WindowCard.qml WorkspaceTab.qml PreviewScheduler.qml
+  Overview.qml WindowCard.qml WindowActions.qml ViewModeSwitch.qml \
+  WorkspaceTab.qml PreviewScheduler.qml
 luac -p task-view.lua
 ```
 
@@ -345,14 +402,49 @@ and dynamically provided Omarchy singletons. These tooling warnings also occur
 with first-party overlays; syntax and manifest failures return a non-zero exit
 status.
 
+## Feasibility and roadmap
+
+The table reflects Omarchy 4.0, Quickshell 0.3, and Hyprland 0.56 as installed
+on the development system.
+
+| Feature | Status | Current approach / limit |
+| --- | --- | --- |
+| All-window overview | SUPPORTED | Reactive Hyprland toplevel model and Wayland single-frame previews |
+| Workspace navigation/minimap | SUPPORTED | Reactive workspace model plus known numeric workspaces 1–9 |
+| Independent workspace lanes | PARTIALLY SUPPORTED | Model and ordering exist; lane rendering is deferred |
+| Keyboard-first navigation | SUPPORTED | Spatial arrows, wrapped Tab, optional Vim keys, immediate focus grab |
+| Fuzzy search | SUPPORTED | Fast metadata-only scoring; application contents are not exposed |
+| Recent windows | PARTIALLY SUPPORTED | In-memory recency plus `focusHistoryID`, no persistence |
+| Move to workspace | SUPPORTED | Exact-address native dispatcher; keyboard shipping now |
+| Workspace drag and drop | REQUIRES WORKAROUND | Possible in QML, but compositor/model races need dedicated testing |
+| Close window | SUPPORTED | Wayland close request with exact-address Hyprland fallback |
+| Quick peek | SUPPORTED | Enlarges the retained frame; creates no live capture stream |
+| Multi-monitor filters/moves | PARTIALLY SUPPORTED | Topology-aware model; only one physical monitor was available for validation |
+| Group by application | SUPPORTED | Reliable app identity exists; grouped presentation is deferred |
+| Window action menu | PARTIALLY SUPPORTED | Safe direct actions ship; float/pin/fullscreen menu is deferred |
+| Command mode | REQUIRES WORKAROUND | A small deterministic grammar is viable but not part of the stable core |
+| Undo | PARTIALLY SUPPORTED | Workspace/monitor moves only; close is never undoable |
+| Media/capture indicators | NOT CURRENTLY FEASIBLE | No reliable PipeWire/portal stream-to-toplevel mapping |
+| Project/context detection | REQUIRES WORKAROUND | Would depend on title, process tree, and `/proc` heuristics |
+| Session persistence | PARTIALLY SUPPORTED | Apps/layout can be approximated; internal application state cannot |
+| Window-rules generator | PARTIALLY SUPPORTED | Technically possible, but safe user-config ownership needs separate design |
+
 ## Current limitations
 
-- `Ctrl+W` window closing is intentionally not implemented to avoid accidental
-  destructive actions.
 - Windows-style `Alt+Tab` hold/release mode is not implemented; the existing
   Omarchy `Alt+Tab` bindings remain untouched.
 - Previews are single frames rather than persistent live streams.
-- Advanced persisted focus-history tracking is not included.
+- Focus history is session-local, complemented by Hyprland's
+  `focusHistoryID`; it is not persisted across shell restarts.
+- Workspace view orders and filters windows by workspace but does not yet
+  render independent vertical workspace lanes.
+- Application-group, command-palette, and full window-action-menu views are
+  deferred; the stable direct shortcuts ship first.
+- Audio, microphone, camera, and screencast indicators are unavailable because
+  current window metadata does not provide a reliable per-toplevel mapping.
+- Project detection, session restoration, and automatic window-rule generation
+  require process/configuration heuristics and are intentionally not part of
+  the stable core.
 
 ## Uninstall
 
