@@ -232,7 +232,35 @@ function fieldTokenScore(value, token, exactScore, prefixScore, wordScore, conta
   if (field.indexOf(token) === 0) return prefixScore
   if (wordStartsWith(field, token)) return wordScore
   if (field.indexOf(token) >= 0) return containsScore
+  var fuzzy = fuzzySubsequenceScore(field, token)
+  if (fuzzy >= 0) return Math.max(1, containsScore - 260 + fuzzy)
   return -1
+}
+
+function fuzzySubsequenceScore(value, token) {
+  var field = foldSearch(value)
+  var needle = foldSearch(token)
+  if (!field || !needle) return -1
+
+  var position = -1
+  var first = -1
+  var gaps = 0
+  var consecutive = 0
+  for (var i = 0; i < needle.length; i++) {
+    var next = field.indexOf(needle.charAt(i), position + 1)
+    if (next < 0) return -1
+    if (first < 0) first = next
+    if (position >= 0) {
+      var gap = next - position - 1
+      gaps += gap
+      if (gap === 0) consecutive += 1
+    }
+    position = next
+  }
+
+  // Prefer compact matches near the beginning while keeping the score small
+  // enough that exact, prefix, word and substring matches always win.
+  return Math.max(0, 180 - first * 8 - gaps * 12 + consecutive * 8)
 }
 
 function searchScore(query, appName, title, appId, workspaceName, monitorName) {
@@ -311,6 +339,7 @@ if (typeof module !== "undefined") {
     scoreDesktopEntry: scoreDesktopEntry,
     bestDesktopEntry: bestDesktopEntry,
     displayName: displayName,
+    fuzzySubsequenceScore: fuzzySubsequenceScore,
     searchScore: searchScore
   }
 }

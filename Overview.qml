@@ -21,9 +21,15 @@ Item {
   property string phase: "closed"
   property bool allWorkspaces: true
   property int workspaceFilter: -1
+  property string monitorFilter: ""
+  property string viewMode: "workspaces"
+  property bool vimNavigation: false
   property string query: ""
   property int selectedIndex: -1
   property string selectedAddress: ""
+  property bool peeked: false
+  property string statusMessage: ""
+  property bool statusError: false
   property string pendingActivationAddress: ""
   property int activationAttempt: 0
   property string previousFocusAddress: ""
@@ -32,7 +38,6 @@ Item {
   property var targetScreen: null
   property var recentAddresses: []
   property int modelGeneration: 0
-  property bool previewRefreshAllRequested: false
   property double openStartedAt: 0
   property int openingLatencyMs: 0
 
@@ -44,11 +49,29 @@ Item {
   readonly property int totalWindowCount: (Hyprland.toplevels.values || []).length
   readonly property var windowRows: buildWindowRows()
   readonly property var workspaceRows: buildWorkspaceRows()
+  readonly property var monitorRows: buildMonitorRows()
 
   ScriptModel {
     id: stableWindowModel
     values: root.windowRows
     objectProp: "address"
+  }
+
+  ScriptModel {
+    id: stableMonitorModel
+    values: root.monitorRows
+    objectProp: "name"
+  }
+
+  WindowActions {
+    id: windowActions
+    onPerformed: function(message) { root.showStatus(message, false) }
+    onFailed: function(message) { root.showStatus(message, true) }
+  }
+
+  PointerMoveGate {
+    id: pointerMoveGate
+    referenceItem: viewport
   }
 
   ScriptModel {
@@ -85,6 +108,17 @@ Item {
     return true
   }
 
+  function configuredVimNavigation() {
+    var config = root.shell && root.shell.shellConfig ? root.shell.shellConfig : null
+    var plugins = config && Array.isArray(config.plugins) ? config.plugins : []
+    for (var i = 0; i < plugins.length; i++) {
+      var entry = plugins[i]
+      if (entry && String(entry.id || "") === root.pluginId)
+        return entry.vimNavigation === true
+    }
+    return false
+  }
+
   function focusedScreen() {
     var screens = Quickshell.screens || []
     var monitor = Hyprland.focusedMonitor
@@ -114,8 +148,14 @@ Item {
     }
     root.allWorkspaces = args.allWorkspaces === undefined
       ? configuredAllWorkspaces() : args.allWorkspaces !== false
+    root.vimNavigation = args.vimNavigation === undefined
+      ? configuredVimNavigation() : args.vimNavigation === true
     root.workspaceFilter = root.allWorkspaces ? -1 : root.currentWorkspaceId
+    root.monitorFilter = ""
+    root.viewMode = "workspaces"
     root.query = ""
+    root.peeked = false
+    root.statusMessage = ""
     root.closeReason = "cancel"
     root.openStartedAt = Date.now()
     root.openingLatencyMs = 0
@@ -138,7 +178,7 @@ Item {
     root.opened = false
     root.phase = "closing"
     root.query = ""
-    root.previewRefreshAllRequested = false
+    root.peeked = false
     previewScheduleTimer.stop()
     previewScheduler.cancel()
     closeTimer.restart()
@@ -185,6 +225,16 @@ Item {
     return isFinite(history) && history >= 0 ? 1000 + history : 1000000
   }
 
+  function recentWindowCount() {
+    var values = Hyprland.toplevels.values || []
+    var count = 0
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] && root.recentAddresses.indexOf(String(values[i].address || "")) >= 0)
+        count += 1
+    }
+    return count
+  }
+
   function buildWindowRows() {
     var values = Hyprland.toplevels.values || []
     var rows = []
@@ -205,6 +255,7 @@ Item {
       var monitor = toplevel.monitor
       var workspaceName = workspace ? String(workspace.name || workspace.id) : "?"
       var monitorName = monitor ? String(monitor.name || "") : ""
+      if (root.monitorFilter && monitorName !== root.monitorFilter) continue
       var searchScore = TaskViewModel.searchScore(
         needle, appName, title, appId, workspaceName, monitorName)
       if (searchScore < 0) continue
@@ -230,10 +281,17 @@ Item {
     rows.sort(function(left, right) {
       if (needle && left.searchScore !== right.searchScore)
         return right.searchScore - left.searchScore
+      if (root.viewMode === "recent" || needle) {
+        if (left.active !== right.active) return left.active ? -1 : 1
+        if (left.recency !== right.recency) return left.recency - right.recency
+      } else {
+        if (left.sameWorkspace !== right.sameWorkspace) return left.sameWorkspace ? -1 : 1
+        if (left.monitorName !== right.monitorName)
+          return left.monitorName.localeCompare(right.monitorName)
+      }
+      if (left.workspaceId !== right.workspaceId) return left.workspaceId - right.workspaceId
       if (left.active !== right.active) return left.active ? -1 : 1
       if (left.recency !== right.recency) return left.recency - right.recency
-      if (left.sameWorkspace !== right.sameWorkspace) return left.sameWorkspace ? -1 : 1
-      if (left.workspaceId !== right.workspaceId) return left.workspaceId - right.workspaceId
       return left.title.localeCompare(right.title)
     })
     return rows
@@ -241,21 +299,68 @@ Item {
 
   function buildWorkspaceRows() {
     var values = Hyprland.workspaces.values || []
+    var byId = ({})
     var rows = []
     for (var i = 0; i < values.length; i++) {
       var workspace = values[i]
-      if (!workspace || workspace.toplevels.values.length === 0) continue
+      if (!workspace || workspace.id < 1) continue
+      byId[String(workspace.id)] = workspace
+    }
+
+    var ids = []
+    for (var fixed = 1; fixed <= 9; fixed++) ids.push(fixed)
+    for (var known in byId) {
+      var numeric = Number(known)
+      if (numeric > 9 && ids.indexOf(numeric) < 0) ids.push(numeric)
+    }
+    ids.sort(function(left, right) { return left - right })
+
+    for (var j = 0; j < ids.length; j++) {
+      var id = ids[j]
+      var workspace = byId[String(id)] || null
+      var windows = workspace && workspace.toplevels ? workspace.toplevels.values || [] : []
       rows.push({
         workspace: workspace,
-        id: workspace.id,
-        name: String(workspace.name || workspace.id),
-        active: workspace.active === true,
-        focused: workspace.focused === true,
-        urgent: workspace.urgent === true,
-        count: workspace.toplevels.values.length
+        id: id,
+        name: workspace ? String(workspace.name || id) : String(id),
+        active: workspace ? workspace.active === true : id === root.currentWorkspaceId,
+        focused: workspace ? workspace.focused === true : id === root.currentWorkspaceId,
+        urgent: workspace ? workspace.urgent === true : false,
+        count: windows.length,
+        empty: windows.length === 0
       })
     }
-    rows.sort(function(left, right) { return left.id - right.id })
+    return rows
+  }
+
+  function buildMonitorRows() {
+    var monitors = Hyprland.monitors.values || []
+    var windows = Hyprland.toplevels.values || []
+    var rows = []
+    for (var i = 0; i < monitors.length; i++) {
+      var monitor = monitors[i]
+      if (!monitor) continue
+      var name = String(monitor.name || "")
+      var count = 0
+      for (var j = 0; j < windows.length; j++) {
+        if (windows[j] && windows[j].monitor && String(windows[j].monitor.name || "") === name)
+          count += 1
+      }
+      rows.push({
+        monitor: monitor,
+        name: name,
+        label: String(monitor.description || name),
+        focused: monitor.focused === true,
+        count: count,
+        x: Number(monitor.x || 0),
+        y: Number(monitor.y || 0)
+      })
+    }
+    rows.sort(function(left, right) {
+      if (left.x !== right.x) return left.x - right.x
+      if (left.y !== right.y) return left.y - right.y
+      return left.name.localeCompare(right.name)
+    })
     return rows
   }
 
@@ -275,6 +380,28 @@ Item {
     root.workspaceFilter = options[next]
   }
 
+  function setViewMode(mode) {
+    var next = String(mode || "")
+    if (next !== "workspaces" && next !== "recent") return false
+    root.viewMode = next
+    return true
+  }
+
+  function monitorFilterOptions() {
+    var options = [""]
+    for (var i = 0; i < root.monitorRows.length; i++)
+      options.push(root.monitorRows[i].name)
+    return options
+  }
+
+  function cycleMonitorFilter(delta) {
+    var options = root.monitorFilterOptions()
+    if (options.length <= 1) return
+    var current = options.indexOf(root.monitorFilter)
+    if (current < 0) current = 0
+    root.monitorFilter = options[(current + delta + options.length) % options.length]
+  }
+
   function filterWorkspaceNumber(number) {
     for (var i = 0; i < root.workspaceRows.length; i++) {
       if (root.workspaceRows[i].id === number) {
@@ -286,11 +413,20 @@ Item {
 
   function reconcileWorkspaceFilter() {
     if (root.workspaceFilter === -1) return
+    if (root.workspaceFilter >= 1 && root.workspaceFilter <= 9) return
     var values = Hyprland.workspaces.values || []
     for (var i = 0; i < values.length; i++) {
       if (values[i] && values[i].id === root.workspaceFilter) return
     }
     root.workspaceFilter = root.allWorkspaces ? -1 : root.currentWorkspaceId
+  }
+
+  function reconcileMonitorFilter() {
+    if (!root.monitorFilter) return
+    for (var i = 0; i < root.monitorRows.length; i++) {
+      if (root.monitorRows[i].name === root.monitorFilter) return
+    }
+    root.monitorFilter = ""
   }
 
   function cardForAddress(address) {
@@ -331,17 +467,14 @@ Item {
     return result
   }
 
-  function requestPreviewSchedule(refreshAll) {
+  function requestPreviewSchedule() {
     if (!root.opened || root.phase !== "ready") return
-    root.previewRefreshAllRequested = root.previewRefreshAllRequested || refreshAll === true
     previewScheduleTimer.restart()
   }
 
   function runPreviewSchedule() {
     if (!root.opened || root.phase !== "ready") return
-    var refreshAll = root.previewRefreshAllRequested
-    root.previewRefreshAllRequested = false
-    previewScheduler.replace(root.prioritizedPreviewAddresses(!refreshAll))
+    previewScheduler.replace(root.prioritizedPreviewAddresses(true))
   }
 
   function rememberActive(toplevel) {
@@ -386,7 +519,7 @@ Item {
     root.setSelection(activeIndex >= 0 ? activeIndex : 0)
   }
 
-  function setSelection(index) {
+  function setSelection(index, fromPointer) {
     if (root.windowRows.length === 0) {
       root.selectedIndex = -1
       root.selectedAddress = ""
@@ -394,6 +527,7 @@ Item {
     }
     root.selectedIndex = Math.max(0, Math.min(index, root.windowRows.length - 1))
     root.selectedAddress = root.windowRows[root.selectedIndex].address
+    if (fromPointer !== true) pointerMoveGate.reset()
     if (root.opened && root.phase === "ready")
       previewScheduler.prioritize(root.selectedAddress)
     positionTimer.restart()
@@ -407,6 +541,45 @@ Item {
   function stepSelection(delta) {
     root.setSelection(TaskViewModel.stepWrapped(
       root.selectedIndex, root.windowRows.length, delta))
+  }
+
+  function selectedRow() {
+    return root.selectedIndex >= 0 && root.selectedIndex < root.windowRows.length
+      ? root.windowRows[root.selectedIndex] : null
+  }
+
+  function showStatus(message, isError) {
+    root.statusMessage = String(message || "")
+    root.statusError = isError === true
+    statusTimer.restart()
+  }
+
+  function closeSelected() {
+    var row = root.selectedRow()
+    if (row) windowActions.closeWindow(row)
+  }
+
+  function moveSelectedToWorkspace(workspaceId) {
+    var row = root.selectedRow()
+    if (row) windowActions.moveToWorkspace(row, workspaceId, true)
+  }
+
+  function moveSelectedToMonitor(delta) {
+    var row = root.selectedRow()
+    if (!row || root.monitorRows.length < 2) {
+      root.showStatus("No other monitor available", true)
+      return
+    }
+    var current = -1
+    for (var i = 0; i < root.monitorRows.length; i++) {
+      if (root.monitorRows[i].name === row.monitorName) {
+        current = i
+        break
+      }
+    }
+    if (current < 0) current = 0
+    var next = (current + delta + root.monitorRows.length) % root.monitorRows.length
+    windowActions.moveToMonitor(row, root.monitorRows[next].name, true)
   }
 
   function findToplevel(address) {
@@ -513,16 +686,23 @@ Item {
       closeReason: root.closeReason,
       closeCount: root.closeCount,
       workspaceFilter: root.workspaceFilter,
-      focusedMonitor: root.focusedMonitorName
+      monitorFilter: root.monitorFilter,
+      focusedMonitor: root.focusedMonitorName,
+      viewMode: root.viewMode,
+      peeked: root.peeked,
+      undoCount: windowActions.undoCount,
+      usingLua: Hyprland.usingLua
     })
   }
 
   onWindowRowsChanged: {
     root.modelGeneration += 1
+    pointerMoveGate.reset()
     reconcileTimer.restart()
-    root.requestPreviewSchedule(false)
+    root.requestPreviewSchedule()
   }
   onWorkspaceRowsChanged: workspaceReconcileTimer.restart()
+  onMonitorRowsChanged: monitorReconcileTimer.restart()
 
   Connections {
     target: Hyprland
@@ -561,7 +741,7 @@ Item {
       root.openingLatencyMs = Math.max(0, Date.now() - root.openStartedAt)
       root.reconcileSelection()
       keyCatcher.forceActiveFocus()
-      root.requestPreviewSchedule(true)
+      root.requestPreviewSchedule()
     }
   }
 
@@ -575,6 +755,18 @@ Item {
     id: workspaceReconcileTimer
     interval: 0
     onTriggered: root.reconcileWorkspaceFilter()
+  }
+
+  Timer {
+    id: monitorReconcileTimer
+    interval: 0
+    onTriggered: root.reconcileMonitorFilter()
+  }
+
+  Timer {
+    id: statusTimer
+    interval: 1800
+    onTriggered: root.statusMessage = ""
   }
 
   Timer {
@@ -672,8 +864,47 @@ Item {
           if (event.key === Qt.Key_Escape) {
             root.close("escape")
             event.accepted = true
+          } else if (event.key === Qt.Key_Space && !root.query
+                     && root.selectedIndex >= 0) {
+            if (!event.isAutoRepeat) root.peeked = true
+            event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.activateIndex(root.selectedIndex)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && (event.modifiers & Qt.ShiftModifier)
+                     && event.key === Qt.Key_Left) {
+            root.moveSelectedToMonitor(-1)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && (event.modifiers & Qt.ShiftModifier)
+                     && event.key === Qt.Key_Right) {
+            root.moveSelectedToMonitor(1)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ShiftModifier)
+                     && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+                     && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+            root.moveSelectedToWorkspace(event.key - Qt.Key_0)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_W) {
+            root.closeSelected()
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_Z) {
+            windowActions.undo()
+            event.accepted = true
+          } else if ((event.modifiers & Qt.ControlModifier)
+                     && event.key === Qt.Key_R) {
+            root.setViewMode(root.viewMode === "recent" ? "workspaces" : "recent")
+            event.accepted = true
+          } else if ((event.modifiers & Qt.AltModifier)
+                     && event.key === Qt.Key_Left) {
+            root.cycleMonitorFilter(-1)
+            event.accepted = true
+          } else if ((event.modifiers & Qt.AltModifier)
+                     && event.key === Qt.Key_Right) {
+            root.cycleMonitorFilter(1)
             event.accepted = true
           } else if ((event.modifiers & Qt.ControlModifier)
                      && event.key === Qt.Key_Left) {
@@ -691,16 +922,24 @@ Item {
                      && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             root.filterWorkspaceNumber(event.key - Qt.Key_0)
             event.accepted = true
-          } else if (event.key === Qt.Key_Left) {
+          } else if (event.key === Qt.Key_Left
+                     || (root.vimNavigation && !root.query
+                         && event.modifiers === Qt.NoModifier && event.key === Qt.Key_H)) {
             root.moveSelection("left")
             event.accepted = true
-          } else if (event.key === Qt.Key_Right) {
+          } else if (event.key === Qt.Key_Right
+                     || (root.vimNavigation && !root.query
+                         && event.modifiers === Qt.NoModifier && event.key === Qt.Key_L)) {
             root.moveSelection("right")
             event.accepted = true
-          } else if (event.key === Qt.Key_Up) {
+          } else if (event.key === Qt.Key_Up
+                     || (root.vimNavigation && !root.query
+                         && event.modifiers === Qt.NoModifier && event.key === Qt.Key_K)) {
             root.moveSelection("up")
             event.accepted = true
-          } else if (event.key === Qt.Key_Down) {
+          } else if (event.key === Qt.Key_Down
+                     || (root.vimNavigation && !root.query
+                         && event.modifiers === Qt.NoModifier && event.key === Qt.Key_J)) {
             root.moveSelection("down")
             event.accepted = true
           } else if (event.key === Qt.Key_Backtab || (event.key === Qt.Key_Tab && event.modifiers & Qt.ShiftModifier)) {
@@ -719,6 +958,12 @@ Item {
             event.accepted = true
           }
         }
+        Keys.onReleased: function(event) {
+          if (event.key === Qt.Key_Space && root.peeked) {
+            root.peeked = false
+            event.accepted = true
+          }
+        }
       }
 
       Item {
@@ -734,7 +979,7 @@ Item {
           spacing: Style.space(3)
 
           Text {
-            text: "Task View"
+            text: "Mission Control"
             color: Color.menu.text
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.display
@@ -747,6 +992,7 @@ Item {
               : root.totalWindowCount)
               + (root.totalWindowCount === 1 ? " window" : " windows")
               + (root.currentWorkspaceName ? "  ·  Workspace " + root.currentWorkspaceName : "")
+              + (root.monitorFilter ? "  ·  " + root.monitorFilter : "")
             color: Color.muted
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.bodySmall
@@ -830,9 +1076,23 @@ Item {
           height: parent.height
           spacing: Style.space(8)
 
+          ViewModeSwitch {
+            mode: root.viewMode
+            workspaceCount: root.totalWindowCount
+            recentCount: root.recentWindowCount()
+            onModeRequested: function(mode) { root.setViewMode(mode) }
+          }
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(1, Style.space(1))
+            height: Style.space(22)
+            color: Util.alpha(Color.menu.text, 0.14)
+          }
+
           WorkspaceTab {
             visible: root.allWorkspaces
-            label: "All windows"
+            label: "All"
             count: Hyprland.toplevels.values.length
             selected: root.workspaceFilter === -1
             active: false
@@ -847,12 +1107,47 @@ Item {
               id: workspaceButton
               required property var modelData
 
-              label: "Workspace " + modelData.name
+              label: modelData.name
               count: modelData.count
               selected: root.workspaceFilter === modelData.id
               active: modelData.focused || modelData.active
               urgent: modelData.urgent
               onClicked: root.workspaceFilter = workspaceButton.modelData.id
+            }
+          }
+
+          Rectangle {
+            visible: root.monitorRows.length > 1
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(1, Style.space(1))
+            height: Style.space(22)
+            color: Util.alpha(Color.menu.text, 0.14)
+          }
+
+          WorkspaceTab {
+            visible: root.monitorRows.length > 1
+            label: "All displays"
+            count: root.totalWindowCount
+            selected: root.monitorFilter === ""
+            active: false
+            urgent: false
+            onClicked: root.monitorFilter = ""
+          }
+
+          Repeater {
+            model: stableMonitorModel
+
+            delegate: WorkspaceTab {
+              id: monitorButton
+              required property var modelData
+
+              visible: root.monitorRows.length > 1
+              label: modelData.name
+              count: modelData.count
+              selected: root.monitorFilter === modelData.name
+              active: modelData.focused
+              urgent: false
+              onClicked: root.monitorFilter = monitorButton.modelData.name
             }
           }
         }
@@ -874,7 +1169,7 @@ Item {
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
           interactive: metrics.contentHeight > height
-          onMovementEnded: root.requestPreviewSchedule(false)
+          onMovementEnded: root.requestPreviewSchedule()
           contentWidth: width
           contentHeight: Math.max(height, metrics.contentHeight)
 
@@ -929,17 +1224,27 @@ Item {
                 active: modelData.active
                 urgent: modelData.urgent
                 selected: index === root.selectedIndex
+                peeked: root.peeked && selected
+                pointerGate: pointerMoveGate
                 showMonitor: modelData.monitorName.length > 0
                   && modelData.monitorName !== root.focusedMonitorName
                 captureEnabled: root.opened && root.phase === "ready"
-                opacity: root.opened ? 1 : 0
 
-                Behavior on opacity {
-                  NumberAnimation { duration: 130; easing.type: Easing.OutCubic }
+                Behavior on x {
+                  enabled: root.opened && root.phase === "ready"
+                  NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+                }
+                Behavior on y {
+                  enabled: root.opened && root.phase === "ready"
+                  NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
                 }
 
-                onHovered: function(nextIndex) { root.setSelection(nextIndex) }
+                onHovered: function(nextIndex) { root.setSelection(nextIndex, true) }
                 onActivated: function(nextIndex) { root.activateIndex(nextIndex) }
+                onCloseRequested: function(nextIndex) {
+                  root.setSelection(nextIndex, true)
+                  root.closeSelected()
+                }
                 onWheelRequested: function(delta) {
                   windowGrid.contentY = Math.max(0, Math.min(
                     Math.max(0, windowGrid.contentHeight - windowGrid.height),
@@ -990,6 +1295,31 @@ Item {
         }
       }
 
+      BorderSurface {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: helpBar.top
+        anchors.bottomMargin: Style.space(10)
+        z: 30
+        visible: root.statusMessage.length > 0
+        implicitWidth: statusText.implicitWidth + Style.space(28)
+        implicitHeight: Style.space(34)
+        radius: Style.cornerRadius
+        color: Color.menu.background
+        borderSpec: Border.flat(
+          Util.alpha(root.statusError ? Color.urgent : Color.accent, 0.72),
+          Math.max(1, Style.space(1)))
+
+        Text {
+          id: statusText
+          anchors.centerIn: parent
+          text: root.statusMessage
+          color: root.statusError ? Color.urgent : Color.menu.text
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.DemiBold
+        }
+      }
+
       Item {
         id: helpBar
         anchors.left: parent.left
@@ -1004,9 +1334,11 @@ Item {
           Repeater {
             model: [
               { keys: "← ↑ ↓ →", label: "Navigate" },
-              { keys: "Ctrl+← →", label: "Workspaces" },
+              { keys: "Space", label: "Peek" },
+              { keys: "Shift+1…9", label: "Move" },
+              { keys: "Ctrl+W", label: "Close" },
               { keys: "Enter", label: "Open" },
-              { keys: "Esc", label: "Close" }
+              { keys: "Esc", label: "Dismiss" }
             ]
 
             delegate: Row {
