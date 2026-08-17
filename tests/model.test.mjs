@@ -19,7 +19,10 @@ const crowdedGrid = model.gridMetrics(1200, 600, 25, 14, 240, 620, 1.6, 64)
 assert.ok(crowdedGrid.columns >= 4)
 assert.ok(crowdedGrid.contentHeight > 600)
 
-for (const [width, height] of [[1024, 600], [1280, 720], [1920, 1080], [3440, 1440]]) {
+for (const [width, height] of [
+  [1024, 600], [1280, 720], [1366, 768], [1920, 1080],
+  [2560, 1440], [3440, 1440], [3840, 2160]
+]) {
   for (let count = 1; count <= 40; count++) {
     const metrics = model.gridMetrics(width, height, count, 16, 240, 620, 1.6, 64)
     assert.ok(Number.isFinite(metrics.cardWidth) && metrics.cardWidth > 0)
@@ -79,6 +82,10 @@ assert.ok(
   > model.searchScore("mozilla", "Firefox", "GitHub — Firefox", "org.mozilla.firefox", "1", "DP-1"))
 assert.ok(model.searchScore("fire github", "Firefox", "GitHub — Firefox", "org.mozilla.firefox", "1", "DP-1") > 0)
 assert.ok(model.searchScore("workspace 2", "Terminal", "Shell", "foot", "Workspace 2", "DP-1") > 0)
+assert.ok(model.searchScore("frfx", "Firefox", "GitHub", "org.mozilla.firefox", "1", "DP-1") > 0)
+assert.ok(model.searchScore("ghb", "Firefox", "GitHub — Firefox", "org.mozilla.firefox", "1", "DP-1") > 0)
+assert.ok(model.fuzzySubsequenceScore("Firefox", "frfx") >= 0)
+assert.equal(model.fuzzySubsequenceScore("Firefox", "fzx"), -1)
 assert.equal(model.searchScore("missing", "Firefox", "GitHub", "org.mozilla.firefox", "1", "DP-1"), -1)
 
 console.log("TaskViewModel tests passed")

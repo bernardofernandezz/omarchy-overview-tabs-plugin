@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "local.task-view",
   "name": "Task View",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Bernardo",
   "license": "MIT",
-  "description": "Native visual window overview for Omarchy, Quattro, Quickshell, and Hyprland.",
+  "description": "Native keyboard-first Mission Control for Omarchy, Quattro, Quickshell, and Hyprland.",
   "kinds": [
     "overlay"
   ],

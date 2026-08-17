@@ -53,12 +53,14 @@ BorderSurface {
       anchors.verticalCenter: parent.verticalCenter
       text: root.label
       color: root.foreground
+      opacity: root.count > 0 || root.selected || root.active ? 1 : 0.52
       font.family: Style.font.menuFamily
       font.pixelSize: Style.font.bodySmall
       font.weight: root.selected || root.active ? Font.DemiBold : Font.Normal
     }
 
     Rectangle {
+      visible: root.count > 0
       anchors.verticalCenter: parent.verticalCenter
       width: countLabel.implicitWidth + Style.space(10)
       height: Math.max(Style.space(20), countLabel.implicitHeight + Style.space(4))
@@ -81,7 +83,6 @@ BorderSurface {
   }
 
   Rectangle {
-    visible: root.selected
     anchors.left: parent.left
     anchors.right: parent.right
     anchors.bottom: parent.bottom
@@ -90,6 +91,11 @@ BorderSurface {
     height: Math.max(1, Style.space(2))
     radius: height / 2
     color: Color.accent
+    opacity: root.selected ? 1 : 0
+    scale: root.selected ? 1 : 0.45
+
+    Behavior on opacity { NumberAnimation { duration: 110 } }
+    Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
   }
 
   MouseArea {

@@ -24,6 +24,8 @@ Item {
   property bool urgent: false
   property bool captureEnabled: false
   property bool showMonitor: false
+  property bool peeked: false
+  property var pointerGate: null
   property var retainedCaptureSource: null
   property bool fallbackArmed: false
   property string captureState: "idle"
@@ -31,6 +33,7 @@ Item {
 
   signal hovered(int index)
   signal activated(int index)
+  signal closeRequested(int index)
   signal wheelRequested(real delta)
 
   readonly property bool hot: pointer.containsMouse
@@ -58,8 +61,11 @@ Item {
       root.captureState = "capturing"
       root.retainedCaptureSource = nextSource
     } else if (preview.hasContent) {
-      root.captureState = "ready"
+      // Refresh the retained frame on every overview opening. ScreencopyView
+      // keeps the previous texture on screen until the compositor delivers the
+      // replacement frame, so previews stay current without flashing.
       preview.captureFrame()
+      root.captureState = "ready"
     } else {
       // A previous one-shot request may have failed. Recreate the context only
       // on the next overview opening, never in a retry loop.
@@ -109,12 +115,24 @@ Item {
     }
   }
 
-  z: selected ? 3 : (hot ? 2 : 1)
-  scale: selected ? 1.014 : (hot ? 1.008 : 1.0)
+  z: peeked ? 12 : (selected ? 3 : (hot ? 2 : 1))
+  scale: peeked ? 1.12 : (selected ? 1.014 : (hot ? 1.008 : 1.0))
   transformOrigin: Item.Center
 
   Behavior on scale {
     NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
+  }
+
+  Rectangle {
+    anchors.fill: parent
+    anchors.margins: -Style.space(4)
+    radius: Math.max(0, Style.cornerRadius + Style.space(4))
+    color: "transparent"
+    border.width: Math.max(1, Style.space(2))
+    border.color: Util.alpha(Color.accent, 0.22)
+    opacity: root.selected ? 1 : 0
+
+    Behavior on opacity { NumberAnimation { duration: 110 } }
   }
 
   BorderSurface {
@@ -255,7 +273,8 @@ Item {
         color: Color.urgent
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.margins: Style.space(11)
+        anchors.rightMargin: root.hot || root.selected ? Style.space(44) : Style.space(11)
+        anchors.topMargin: Style.space(11)
       }
     }
 
@@ -364,8 +383,47 @@ Item {
     anchors.fill: parent
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onEntered: root.hovered(root.index)
+    onPositionChanged: function(mouse) {
+      if (!root.pointerGate || root.pointerGate.moved(pointer, mouse))
+        root.hovered(root.index)
+    }
     onClicked: root.activated(root.index)
     onWheel: function(wheel) { root.wheelRequested(wheel.angleDelta.y) }
+  }
+
+  Rectangle {
+    id: closeButton
+    z: 20
+    visible: root.hot || root.selected
+    anchors.top: parent.top
+    anchors.right: parent.right
+    anchors.margins: Style.space(9)
+    width: Style.space(27)
+    height: width
+    radius: width / 2
+    color: closePointer.pressed
+      ? Style.pressedFillFor(Color.menu.text, Color.accent, Color.urgent)
+      : closePointer.containsMouse
+        ? Style.hoverFillFor(Color.menu.text, Color.accent, Color.urgent)
+        : Util.alpha(Color.background, 0.82)
+
+    Text {
+      anchors.centerIn: parent
+      text: "×"
+      color: Color.menu.text
+      font.family: Style.font.menuFamily
+      font.pixelSize: Style.font.heading
+    }
+
+    MouseArea {
+      id: closePointer
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: {
+        root.hovered(root.index)
+        root.closeRequested(root.index)
+      }
+    }
   }
 }
