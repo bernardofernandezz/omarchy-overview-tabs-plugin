@@ -61,9 +61,10 @@ Item {
       root.captureState = "capturing"
       root.retainedCaptureSource = nextSource
     } else if (preview.hasContent) {
-      // Keep the retained frame across overview sessions. Asking the
-      // compositor for a replacement frame here makes some clients briefly
-      // invalidate the texture and produces a visible flash on Super+Tab.
+      // Refresh the retained frame on every overview opening. ScreencopyView
+      // keeps the previous texture on screen until the compositor delivers the
+      // replacement frame, so previews stay current without flashing.
+      preview.captureFrame()
       root.captureState = "ready"
     } else {
       // A previous one-shot request may have failed. Recreate the context only

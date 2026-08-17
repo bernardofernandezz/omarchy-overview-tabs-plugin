@@ -39,8 +39,9 @@ service.
 - Graceful icon-and-title fallback when a preview is unavailable
 - Pointer-motion gating that prevents selection churn when cards move under a
   stationary cursor
-- Retained preview textures and a single overlay animation, avoiding the
-  flash caused by recapturing every card on each opening
+- In-place preview refresh on every opening: visible cards re-capture while
+  the retained texture stays on screen, so previews never go stale and never
+  flash
 - No polling, persisted screenshots, or extra runtime dependencies
 
 ## Requirements
@@ -299,13 +300,18 @@ local.task-view/
 - Cards capture one frame with `live: false` through a paced queue. The selected
   card and cards already visible in the viewport are prioritized.
 - Captures begin only after the overlay becomes interactive.
+- Every opening requests a fresh frame for each card. `ScreencopyView`'s
+  `captureFrame()` refreshes the image in place: the retained texture stays on
+  screen until the compositor delivers the replacement, so previews never show
+  stale content and never flash.
 - Cards are keyed by immutable Hyprland address through `ScriptModel`, so model
   changes update existing delegates instead of destroying and recreating every
   preview surface.
-- The latest static frame stays in memory while its card and toplevel exist so
-  reopening the overview does not flash from fallback content to a new frame.
-- No frames are captured while Task View is closed. Reopening reuses the last
-  retained frame; a new capture context is created only for a new source or
+- The latest static frame stays in memory while its card and toplevel exist and
+  bridges each refresh, so a slow or temporarily unavailable capture degrades to
+  the previous frame instead of fallback content.
+- No frames are captured while Task View is closed. Reopening re-captures the
+  visible cards; a new capture context is created only for a new source or
   after a failed source is retried on a later session.
 - Preview aspect ratios are preserved.
 - `ScreencopyView.constraintSize` performs the native aspect-fit calculation,

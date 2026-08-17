@@ -437,15 +437,13 @@ Item {
     return null
   }
 
-  function prioritizedPreviewAddresses(onlyMissing) {
+  function prioritizedPreviewAddresses() {
     var result = []
     var seen = ({})
 
     function add(address) {
       address = String(address || "")
       if (!address || seen[address]) return
-      var card = root.cardForAddress(address)
-      if (onlyMissing && card && card.captureState !== "idle") return
       seen[address] = true
       result.push(address)
     }
@@ -474,7 +472,10 @@ Item {
 
   function runPreviewSchedule() {
     if (!root.opened || root.phase !== "ready") return
-    previewScheduler.replace(root.prioritizedPreviewAddresses(true))
+    // Every opening re-captures all visible cards so retained frames never
+    // show stale content; captureFrame() keeps the old frame until the new
+    // one is ready, so the refresh is invisible.
+    previewScheduler.replace(root.prioritizedPreviewAddresses())
   }
 
   function rememberActive(toplevel) {
